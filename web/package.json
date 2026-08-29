@@ -6,8 +6,9 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "predev": "node scripts/check-node-version.mjs",
+    "predev": "node scripts/check-node-version.mjs && node scripts/sync-stockfish-assets.mjs",
     "dev": "vinext dev",
+    "prebuild": "node scripts/check-node-version.mjs && node scripts/sync-stockfish-assets.mjs",
     "build": "vinext build",
     "start": "vinext start",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"

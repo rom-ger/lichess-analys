@@ -1,10 +1,13 @@
 import { Chess } from 'chess.js';
-import stockfishWorkerUrl from 'stockfish/bin/stockfish-18-lite-single.js?url';
-import stockfishWasmUrl from 'stockfish/bin/stockfish-18-lite-single.wasm?url';
 import type { PositionEvaluation } from './lichess';
 
 export const STOCKFISH_VERSION = '18-lite';
 export const STOCKFISH_DEPTH = 14;
+
+const STOCKFISH_READY_TIMEOUT_MS = 20_000;
+const STOCKFISH_ANALYSIS_TIMEOUT_MS = 45_000;
+const STOCKFISH_WORKER_URL = '/stockfish/stockfish-18-lite-single.js';
+const STOCKFISH_WASM_URL = '/stockfish/stockfish-18-lite-single.wasm';
 
 export type StockfishAnalysis = {
   fen: string;
@@ -24,6 +27,7 @@ type PendingAnalysis = {
   resolve: (analysis: StockfishAnalysis) => void;
   reject: (error: Error) => void;
   removeAbortListener?: () => void;
+  timeout?: ReturnType<typeof setTimeout>;
 };
 
 function evaluationFromUci(fen: string, kind: 'cp' | 'mate', rawValue: number) {
@@ -83,6 +87,7 @@ class StockfishEngine {
   private readyPromise: Promise<void> | null = null;
   private resolveReady: (() => void) | null = null;
   private rejectReady: ((error: Error) => void) | null = null;
+  private readyTimeout: ReturnType<typeof setTimeout> | null = null;
   private queue: PendingAnalysis[] = [];
   private current: PendingAnalysis | null = null;
 
@@ -94,15 +99,25 @@ class StockfishEngine {
       this.rejectReady = reject;
     });
 
-    const workerUrl = `${stockfishWorkerUrl}#${encodeURIComponent(stockfishWasmUrl)},worker`;
-    this.worker = new Worker(workerUrl);
+    // Stockfish reads the WASM URL from the fragment. The optional `,worker`
+    // marker is reserved for workers spawned internally by the threaded build;
+    // adding it here makes the single-threaded entrypoint skip initialization.
+    const workerUrl = `${STOCKFISH_WORKER_URL}#${encodeURIComponent(STOCKFISH_WASM_URL)}`;
+    this.worker = new Worker(workerUrl, { name: 'stockfish-analysis' });
     this.worker.addEventListener('message', (event: MessageEvent<unknown>) => {
       if (typeof event.data !== 'string') return;
       for (const line of event.data.split(/\r?\n/)) this.handleLine(line.trim());
     });
-    this.worker.addEventListener('error', () => {
-      this.fail(new Error('Не удалось запустить Stockfish в этом браузере.'));
+    this.worker.addEventListener('error', (event) => {
+      const details = event.message ? `: ${event.message}` : '';
+      this.fail(new Error(`Не удалось запустить Stockfish в этом браузере${details}`));
     });
+    this.worker.addEventListener('messageerror', () => {
+      this.fail(new Error('Браузер не смог прочитать ответ Stockfish.'));
+    });
+    this.readyTimeout = setTimeout(() => {
+      this.fail(new Error('Stockfish не загрузился за 20 секунд. Обновите страницу и попробуйте снова.'));
+    }, STOCKFISH_READY_TIMEOUT_MS);
     this.worker.postMessage('uci');
 
     return this.readyPromise;
@@ -115,6 +130,8 @@ class StockfishEngine {
       return;
     }
     if (line === 'readyok') {
+      if (this.readyTimeout) clearTimeout(this.readyTimeout);
+      this.readyTimeout = null;
       this.resolveReady?.();
       this.resolveReady = null;
       this.rejectReady = null;
@@ -134,6 +151,7 @@ class StockfishEngine {
       const task = this.current;
       const bestMove = line.split(/\s+/)[1];
       this.current = null;
+      if (task.timeout) clearTimeout(task.timeout);
       task.removeAbortListener?.();
 
       if (task.aborted) {
@@ -151,11 +169,20 @@ class StockfishEngine {
   }
 
   private fail(error: Error) {
+    if (this.readyTimeout) clearTimeout(this.readyTimeout);
+    this.readyTimeout = null;
     this.rejectReady?.(error);
     this.rejectReady = null;
     this.resolveReady = null;
-    if (this.current) this.current.reject(error);
-    for (const task of this.queue) task.reject(error);
+    if (this.current) {
+      if (this.current.timeout) clearTimeout(this.current.timeout);
+      this.current.removeAbortListener?.();
+      this.current.reject(error);
+    }
+    for (const task of this.queue) {
+      task.removeAbortListener?.();
+      task.reject(error);
+    }
     this.current = null;
     this.queue = [];
     this.worker?.terminate();
@@ -175,6 +202,9 @@ class StockfishEngine {
     if (!task) return;
 
     this.current = task;
+    task.timeout = setTimeout(() => {
+      this.fail(new Error('Stockfish не завершил анализ за 45 секунд. Попробуйте ещё раз.'));
+    }, STOCKFISH_ANALYSIS_TIMEOUT_MS);
     this.worker.postMessage(`position fen ${task.fen}`);
     this.worker.postMessage(`go depth ${task.depth}`);
   }
