@@ -3,11 +3,21 @@
 import Link from 'next/link';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  classifyMove,
+  evaluationToWhiteWinPercent,
   getGameById,
   type GameDetails,
   type GameMove,
+  type MoveJudgement,
   type GamePlayer,
+  type PositionEvaluation,
 } from '../../../lib/lichess';
+import { cacheAnalysis, getCachedAnalysis } from '../../../lib/analysis-cache';
+import {
+  analyzePosition,
+  STOCKFISH_DEPTH,
+  type StockfishAnalysis,
+} from '../../../lib/stockfish';
 
 const files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
 const ranks = ['8', '7', '6', '5', '4', '3', '2', '1'];
@@ -47,10 +57,12 @@ function boardFromFen(fen: string) {
 }
 
 function ChessBoard({
+  bestMove,
   fen,
   orientation,
   lastMove,
 }: {
+  bestMove?: string | null;
   fen: string;
   orientation: GameDetails['playerColor'];
   lastMove?: GameMove;
@@ -58,6 +70,9 @@ function ChessBoard({
   const position = useMemo(() => boardFromFen(fen), [fen]);
   const shownFiles = orientation === 'white' ? files : [...files].reverse();
   const shownRanks = orientation === 'white' ? ranks : [...ranks].reverse();
+  const bestMoveMatch = bestMove?.match(/^([a-h][1-8])([a-h][1-8])/);
+  const bestFrom = bestMoveMatch?.[1];
+  const bestTo = bestMoveMatch?.[2];
 
   return (
     <div
@@ -70,10 +85,12 @@ function ChessBoard({
         const piece = position.get(square);
         const isDark = (files.indexOf(file) + Number(rank)) % 2 === 1;
         const isLastMove = square === lastMove?.from || square === lastMove?.to;
+        const isBestFrom = square === bestFrom;
+        const isBestTo = square === bestTo;
 
         return (
           <div
-            className={`board-square board-square--${isDark ? 'dark' : 'light'}${isLastMove ? ' board-square--last' : ''}`}
+            className={`board-square board-square--${isDark ? 'dark' : 'light'}${isLastMove ? ' board-square--last' : ''}${isBestFrom ? ' board-square--best-from' : ''}${isBestTo ? ' board-square--best-to' : ''}`}
             key={square}
           >
             {fileIndex === 0 && <span className="rank-label">{rank}</span>}
@@ -92,6 +109,102 @@ function ChessBoard({
     </div>
   );
 }
+
+function formatEvaluation(evaluation: PositionEvaluation | null) {
+  if (!evaluation) return '—';
+  if (evaluation.kind === 'mate') {
+    return evaluation.value > 0 ? `+M${evaluation.value}` : `−M${Math.abs(evaluation.value)}`;
+  }
+  const pawns = evaluation.value / 100;
+  if (Math.abs(pawns) < 0.005) return '0.00';
+  return `${pawns > 0 ? '+' : '−'}${Math.abs(pawns).toFixed(2)}`;
+}
+
+const judgementLabels: Record<MoveJudgement, { glyph: string; label: string }> = {
+  inaccuracy: { glyph: '?!', label: 'Неточность' },
+  mistake: { glyph: '?', label: 'Ошибка' },
+  blunder: { glyph: '??', label: 'Грубая ошибка' },
+};
+
+function EvaluationBar({
+  evaluation,
+  orientation,
+}: {
+  evaluation: PositionEvaluation | null;
+  orientation: GameDetails['playerColor'];
+}) {
+  const whitePercent = evaluation ? evaluationToWhiteWinPercent(evaluation) : 50;
+
+  return (
+    <div
+      aria-label={`Оценка позиции: ${formatEvaluation(evaluation)} с точки зрения белых`}
+      className={`evaluation-bar evaluation-bar--${orientation}`}
+      role="meter"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={Math.round(whitePercent)}
+    >
+      <span className="evaluation-bar__white" style={{ height: `${whitePercent}%` }} />
+      <strong>{formatEvaluation(evaluation)}</strong>
+    </div>
+  );
+}
+
+function EvaluationGraph({
+  currentPly,
+  evaluations,
+  onSelect,
+}: {
+  currentPly: number;
+  evaluations: Array<PositionEvaluation | null>;
+  onSelect: (ply: number) => void;
+}) {
+  if (!evaluations.some((evaluation, index) => index > 0 && evaluation)) return null;
+
+  return (
+    <div className="evaluation-chart" aria-label="График оценки партии">
+      <span className="evaluation-chart__middle" aria-hidden="true" />
+      {evaluations.map((evaluation, ply) => {
+        const whitePercent = evaluation ? evaluationToWhiteWinPercent(evaluation) : 50;
+        const bottom = Math.min(50, whitePercent);
+        const height = Math.max(1.5, Math.abs(whitePercent - 50));
+        return (
+          <button
+            aria-label={`Позиция ${ply}: ${formatEvaluation(evaluation)}`}
+            aria-pressed={currentPly === ply}
+            className="evaluation-chart__point"
+            key={ply}
+            onClick={() => onSelect(ply)}
+            type="button"
+          >
+            {evaluation && (
+              <span
+                className={`evaluation-chart__bar ${whitePercent >= 50 ? 'evaluation-chart__bar--white' : 'evaluation-chart__bar--black'}`}
+                style={{ bottom: `${bottom}%`, height: `${height}%` }}
+              />
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function judgementCounts(moves: Array<GameMove & { judgement: MoveJudgement | null }>) {
+  return moves.reduce(
+    (counts, move) => {
+      if (move.judgement) counts[move.judgement] += 1;
+      return counts;
+    },
+    { inaccuracy: 0, mistake: 0, blunder: 0 },
+  );
+}
+
+type AnalysisStatus =
+  | { kind: 'idle' }
+  | { kind: 'position'; ply: number }
+  | { kind: 'full'; current: number; total: number }
+  | { kind: 'error'; message: string };
 
 function formatClock(seconds: number | null) {
   if (seconds === null) return null;
@@ -155,7 +268,10 @@ function scoresFor(game: GameDetails) {
 export function GameViewer({ gameId, username }: { gameId: string; username: string }) {
   const game = useMemo(() => getGameById(username, gameId), [gameId, username]);
   const [currentPly, setCurrentPly] = useState(0);
+  const [engineAnalysisByPly, setEngineAnalysisByPly] = useState<Record<number, StockfishAnalysis>>({});
+  const [analysisStatus, setAnalysisStatus] = useState<AnalysisStatus>({ kind: 'idle' });
   const activeMoveRef = useRef<HTMLButtonElement>(null);
+  const analysisAbortRef = useRef<AbortController>(null);
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
@@ -183,6 +299,8 @@ export function GameViewer({ gameId, username }: { gameId: string; username: str
     activeMoveRef.current?.scrollIntoView({ block: 'nearest' });
   }, [currentPly]);
 
+  useEffect(() => () => analysisAbortRef.current?.abort(), []);
+
   if (!game) {
     return (
       <div className="state-message game-state-message">
@@ -193,8 +311,31 @@ export function GameViewer({ gameId, username }: { gameId: string; username: str
     );
   }
 
+  const loadedGame = game;
+
   const currentMove = currentPly > 0 ? game.moves[currentPly - 1] : undefined;
   const fen = currentMove?.fen ?? game.initialFen;
+  const evaluations = [
+    game.initialEvaluation,
+    ...game.moves.map((move) => move.evaluation),
+  ].map((evaluation, ply) => engineAnalysisByPly[ply]?.evaluation ?? evaluation);
+  const annotatedMoves = game.moves.map((move, index) => {
+    if (!engineAnalysisByPly[index] || !engineAnalysisByPly[index + 1]) return move;
+    const classification = classifyMove(
+      engineAnalysisByPly[index].evaluation,
+      engineAnalysisByPly[index + 1].evaluation,
+      move.ply % 2 === 1 ? 'white' : 'black',
+    );
+    return { ...move, ...classification };
+  });
+  const playerMoves = annotatedMoves.filter((move) => (
+    game.playerColor === 'white' ? move.ply % 2 === 1 : move.ply % 2 === 0
+  ));
+  const counts = judgementCounts(playerMoves);
+  const playerErrors = playerMoves.filter((move) => move.judgement);
+  const currentEvaluation = evaluations[currentPly] ?? null;
+  const currentEngineAnalysis = engineAnalysisByPly[currentPly];
+  const analysisIsRunning = analysisStatus.kind === 'position' || analysisStatus.kind === 'full';
   const whiteClockSeconds = currentMove?.whiteClockSeconds ?? game.initialClockSeconds;
   const blackClockSeconds = currentMove?.blackClockSeconds ?? game.initialClockSeconds;
   const materialBalance = currentMove?.materialBalance ?? game.initialMaterialBalance;
@@ -215,9 +356,81 @@ export function GameViewer({ gameId, username }: { gameId: string; username: str
     : whiteMaterialAdvantage;
   const moveRows = Array.from({ length: Math.ceil(game.moves.length / 2) }, (_, index) => ({
     number: index + 1,
-    white: game.moves[index * 2],
-    black: game.moves[index * 2 + 1],
+    white: annotatedMoves[index * 2],
+    black: annotatedMoves[index * 2 + 1],
   }));
+
+  function moveToError(direction: 'previous' | 'next') {
+    const candidates = direction === 'previous'
+      ? playerErrors.filter((move) => move.ply < currentPly).reverse()
+      : playerErrors.filter((move) => move.ply > currentPly);
+    if (candidates[0]) setCurrentPly(candidates[0].ply);
+  }
+
+  function stopAnalysis() {
+    analysisAbortRef.current?.abort();
+    analysisAbortRef.current = null;
+    setAnalysisStatus({ kind: 'idle' });
+  }
+
+  async function analyzePly(ply: number, signal: AbortSignal) {
+    const positionFen = ply === 0 ? loadedGame.initialFen : loadedGame.moves[ply - 1].fen;
+    const cached = await getCachedAnalysis(loadedGame.id, ply, positionFen, STOCKFISH_DEPTH);
+    if (cached) return cached;
+
+    const analysis = await analyzePosition(positionFen, { depth: STOCKFISH_DEPTH, signal });
+    await cacheAnalysis(loadedGame.id, ply, analysis);
+    return analysis;
+  }
+
+  async function analyzeCurrentPosition() {
+    stopAnalysis();
+    const controller = new AbortController();
+    analysisAbortRef.current = controller;
+    setAnalysisStatus({ kind: 'position', ply: currentPly });
+
+    try {
+      const analysis = await analyzePly(currentPly, controller.signal);
+      if (controller.signal.aborted) return;
+      setEngineAnalysisByPly((current) => ({ ...current, [currentPly]: analysis }));
+      setAnalysisStatus({ kind: 'idle' });
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      setAnalysisStatus({
+        kind: 'error',
+        message: error instanceof Error ? error.message : 'Не удалось выполнить анализ.',
+      });
+    } finally {
+      if (analysisAbortRef.current === controller) analysisAbortRef.current = null;
+    }
+  }
+
+  async function analyzeWholeGame() {
+    stopAnalysis();
+    const controller = new AbortController();
+    analysisAbortRef.current = controller;
+    const total = loadedGame.moves.length + 1;
+    const collected = { ...engineAnalysisByPly };
+
+    try {
+      for (let ply = 0; ply < total; ply += 1) {
+        if (controller.signal.aborted) return;
+        setAnalysisStatus({ kind: 'full', current: ply + 1, total });
+        const analysis = collected[ply] ?? await analyzePly(ply, controller.signal);
+        collected[ply] = analysis;
+        setEngineAnalysisByPly((current) => ({ ...current, [ply]: analysis }));
+      }
+      setAnalysisStatus({ kind: 'idle' });
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      setAnalysisStatus({
+        kind: 'error',
+        message: error instanceof Error ? error.message : 'Не удалось проанализировать партию.',
+      });
+    } finally {
+      if (analysisAbortRef.current === controller) analysisAbortRef.current = null;
+    }
+  }
 
   return (
     <section className="game-viewer" aria-labelledby="game-title">
@@ -228,7 +441,15 @@ export function GameViewer({ gameId, username }: { gameId: string; username: str
           player={topPlayer}
           score={topScore}
         />
-        <ChessBoard fen={fen} lastMove={currentMove} orientation={game.playerColor} />
+        <div className="board-with-evaluation">
+          <EvaluationBar evaluation={currentEvaluation} orientation={game.playerColor} />
+          <ChessBoard
+            bestMove={currentEngineAnalysis?.bestMove}
+            fen={fen}
+            lastMove={currentMove}
+            orientation={game.playerColor}
+          />
+        </div>
         <PlayerBar
           clockSeconds={bottomClock}
           materialAdvantage={bottomMaterialAdvantage}
@@ -249,6 +470,87 @@ export function GameViewer({ gameId, username }: { gameId: string; username: str
           </p>
         </header>
 
+        <section className="analysis-overview" aria-label="Компьютерный анализ">
+          <div className="analysis-summary">
+            {(['inaccuracy', 'mistake', 'blunder'] as const).map((judgement) => (
+              <span className={`analysis-count analysis-count--${judgement}`} key={judgement}>
+                <strong>{counts[judgement]}</strong>
+                {judgementLabels[judgement].label.toLowerCase()}
+              </span>
+            ))}
+            <div className="error-navigation" aria-label="Навигация по ошибкам">
+              <button
+                aria-label="Предыдущая ошибка"
+                disabled={!playerErrors.some((move) => move.ply < currentPly)}
+                onClick={() => moveToError('previous')}
+                type="button"
+              >
+                ‹
+              </button>
+              <button
+                aria-label="Следующая ошибка"
+                disabled={!playerErrors.some((move) => move.ply > currentPly)}
+                onClick={() => moveToError('next')}
+                type="button"
+              >
+                ›
+              </button>
+            </div>
+          </div>
+
+          <EvaluationGraph
+            currentPly={currentPly}
+            evaluations={evaluations}
+            onSelect={setCurrentPly}
+          />
+
+          <div className="engine-analysis">
+            <div className="engine-analysis__result">
+              <span className="engine-label">
+                {currentEngineAnalysis ? `Stockfish 18 · глубина ${currentEngineAnalysis.depth}` : 'Оценка позиции'}
+              </span>
+              <strong>{formatEvaluation(currentEvaluation)}</strong>
+              {currentEngineAnalysis?.pvSan.length ? (
+                <p title={currentEngineAnalysis.pv.join(' ')}>
+                  {currentEngineAnalysis.pvSan.slice(0, 8).join(' ')}
+                </p>
+              ) : (
+                <p>{currentEvaluation ? 'Доступна из PGN' : 'Позиция ещё не анализировалась'}</p>
+              )}
+            </div>
+
+            <div className="engine-actions">
+              {analysisIsRunning ? (
+                <button className="engine-button engine-button--stop" onClick={stopAnalysis} type="button">
+                  Остановить
+                </button>
+              ) : (
+                <>
+                  <button className="engine-button" onClick={analyzeCurrentPosition} type="button">
+                    Анализ позиции
+                  </button>
+                  <button className="engine-button engine-button--secondary" onClick={analyzeWholeGame} type="button">
+                    Вся партия
+                  </button>
+                </>
+              )}
+            </div>
+
+            {analysisStatus.kind === 'position' && (
+              <p className="analysis-status">Stockfish анализирует позицию…</p>
+            )}
+            {analysisStatus.kind === 'full' && (
+              <div className="analysis-progress">
+                <span>Анализ партии: {analysisStatus.current} / {analysisStatus.total}</span>
+                <progress max={analysisStatus.total} value={analysisStatus.current} />
+              </div>
+            )}
+            {analysisStatus.kind === 'error' && (
+              <p className="analysis-status analysis-status--error">{analysisStatus.message}</p>
+            )}
+          </div>
+        </section>
+
         <div className="moves-list" aria-label="Ходы партии">
           {moveRows.map((row) => (
             <div className="move-row" key={row.number}>
@@ -262,10 +564,22 @@ export function GameViewer({ gameId, username }: { gameId: string; username: str
                   ref={currentPly === move.ply ? activeMoveRef : undefined}
                   type="button"
                 >
-                  <span>{move.san}</span>
-                  {move.clockSeconds !== null && (
-                    <time>{formatClock(move.clockSeconds)}</time>
-                  )}
+                  <span className="move-san">
+                    {move.san}
+                    {move.judgement && (
+                      <span
+                        aria-label={judgementLabels[move.judgement].label}
+                        className={`move-judgement move-judgement--${move.judgement}`}
+                        title={`${judgementLabels[move.judgement].label}${move.winPercentLoss === null ? '' : `: потеря ${move.winPercentLoss.toFixed(0)}% шансов на победу`}`}
+                      >
+                        {judgementLabels[move.judgement].glyph}
+                      </span>
+                    )}
+                  </span>
+                  <span className="move-data">
+                    {evaluations[move.ply] && <small>{formatEvaluation(evaluations[move.ply])}</small>}
+                    {move.clockSeconds !== null && <time>{formatClock(move.clockSeconds)}</time>}
+                  </span>
                 </button>
               ) : <span key={colorIndex} />)}
             </div>
@@ -281,7 +595,12 @@ export function GameViewer({ gameId, username }: { gameId: string; username: str
         </div>
 
         <footer className="moves-footer">
-          <span>Навигация: ← → Home End</span>
+          <span>
+            Навигация: ← → Home End ·{' '}
+            <a href="https://github.com/nmrugg/stockfish.js" rel="noreferrer" target="_blank">
+              Stockfish GPLv3
+            </a>
+          </span>
           {game.siteUrl && (
             <a href={game.siteUrl} rel="noreferrer" target="_blank">Открыть на Lichess ↗</a>
           )}

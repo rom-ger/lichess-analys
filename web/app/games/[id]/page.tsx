@@ -28,7 +28,7 @@ export default async function GamePage({
           </p>
         </div>
       ) : (
-        <GameViewer gameId={decodeURIComponent(id)} username={username} />
+        <GameViewer key={id} gameId={decodeURIComponent(id)} username={username} />
       )}
     </main>
   );

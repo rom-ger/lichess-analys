@@ -16,7 +16,8 @@
     "chess.js": "^1.4.0",
     "next": "16.2.6",
     "react": "19.2.6",
-    "react-dom": "19.2.6"
+    "react-dom": "19.2.6",
+    "stockfish": "^18.0.8"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",

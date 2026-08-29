@@ -9,6 +9,12 @@ const pgnFiles = import.meta.glob('../../pgn/*.pgn', {
 export type GameSpeed = 'bullet' | 'blitz' | 'rapid';
 export type GameResult = 'draw' | 'loss' | 'win';
 
+export type PositionEvaluation =
+  | { kind: 'centipawns'; value: number }
+  | { kind: 'mate'; value: number };
+
+export type MoveJudgement = 'inaccuracy' | 'mistake' | 'blunder';
+
 export type GameRow = {
   id: string;
   playedAt: number;
@@ -28,6 +34,9 @@ export type GameMove = {
   whiteClockSeconds: number | null;
   blackClockSeconds: number | null;
   materialBalance: number;
+  evaluation: PositionEvaluation | null;
+  judgement: MoveJudgement | null;
+  winPercentLoss: number | null;
 };
 
 export type GamePlayer = {
@@ -42,6 +51,7 @@ export type GameDetails = GameRow & {
   initialFen: string;
   initialClockSeconds: number | null;
   initialMaterialBalance: number;
+  initialEvaluation: PositionEvaluation;
   moves: GameMove[];
   siteUrl?: string;
   termination?: string;
@@ -131,6 +141,53 @@ function clockFromComment(comment: string | undefined) {
 
   const [, hours, minutes, seconds] = match;
   return Number(hours) * 3600 + Number(minutes) * 60 + Number(seconds);
+}
+
+function evaluationFromComment(comment: string | undefined): PositionEvaluation | null {
+  const match = comment?.match(/\[%eval\s+([+-]?(?:#-?\d+|\d+(?:\.\d+)?))\]/);
+  if (!match) return null;
+
+  const rawEvaluation = match[1];
+  if (rawEvaluation.includes('#')) {
+    const value = Number(rawEvaluation.replace('#', ''));
+    return Number.isFinite(value) ? { kind: 'mate', value } : null;
+  }
+
+  const value = Number(rawEvaluation) * 100;
+  return Number.isFinite(value) ? { kind: 'centipawns', value: Math.round(value) } : null;
+}
+
+export function evaluationToWhiteWinPercent(evaluation: PositionEvaluation) {
+  const centipawns = evaluation.kind === 'mate'
+    ? Math.sign(evaluation.value || -1) * 1000
+    : Math.max(-1000, Math.min(1000, evaluation.value));
+  const winningChances = 2 / (1 + Math.exp(-0.00368208 * centipawns)) - 1;
+  return 50 + 50 * winningChances;
+}
+
+export function classifyMove(
+  before: PositionEvaluation | null,
+  after: PositionEvaluation | null,
+  mover: 'white' | 'black',
+) {
+  if (!before || !after) {
+    return { judgement: null, winPercentLoss: null };
+  }
+
+  const beforeWhite = evaluationToWhiteWinPercent(before);
+  const afterWhite = evaluationToWhiteWinPercent(after);
+  const beforeMover = mover === 'white' ? beforeWhite : 100 - beforeWhite;
+  const afterMover = mover === 'white' ? afterWhite : 100 - afterWhite;
+  const winPercentLoss = Math.max(0, beforeMover - afterMover);
+  const judgement: MoveJudgement | null = winPercentLoss >= 30
+    ? 'blunder'
+    : winPercentLoss >= 20
+      ? 'mistake'
+      : winPercentLoss >= 10
+        ? 'inaccuracy'
+        : null;
+
+  return { judgement, winPercentLoss };
 }
 
 function materialBalanceFromFen(fen: string) {
@@ -230,15 +287,25 @@ export function getGameById(username: string, id: string): GameDetails | undefin
   const history = chess.history({ verbose: true });
   const initialFen = history[0]?.before ?? new Chess().fen();
   const initialClockSeconds = initialClockFromTag(game.tags.TimeControl);
+  const initialEvaluation: PositionEvaluation = { kind: 'centipawns', value: 15 };
   const commentsByFen = new Map(
     chess.getComments().map(({ fen, comment }) => [fen, comment]),
   );
   let whiteClockSeconds = initialClockSeconds;
   let blackClockSeconds = initialClockSeconds;
+  let previousEvaluation: PositionEvaluation | null = initialEvaluation;
   const moves = history.map((move, index): GameMove => {
-    const clockSeconds = clockFromComment(commentsByFen.get(move.after));
+    const comment = commentsByFen.get(move.after);
+    const clockSeconds = clockFromComment(comment);
+    const evaluation = evaluationFromComment(comment);
+    const { judgement, winPercentLoss } = classifyMove(
+      previousEvaluation,
+      evaluation,
+      move.color === 'w' ? 'white' : 'black',
+    );
     if (move.color === 'w' && clockSeconds !== null) whiteClockSeconds = clockSeconds;
     if (move.color === 'b' && clockSeconds !== null) blackClockSeconds = clockSeconds;
+    previousEvaluation = evaluation;
 
     return {
       ply: index + 1,
@@ -250,6 +317,9 @@ export function getGameById(username: string, id: string): GameDetails | undefin
       whiteClockSeconds,
       blackClockSeconds,
       materialBalance: materialBalanceFromFen(move.after),
+      evaluation,
+      judgement,
+      winPercentLoss,
     };
   });
 
@@ -274,6 +344,7 @@ export function getGameById(username: string, id: string): GameDetails | undefin
     initialFen,
     initialClockSeconds,
     initialMaterialBalance: materialBalanceFromFen(initialFen),
+    initialEvaluation,
     moves,
     siteUrl: game.tags.Site,
     termination: game.tags.Termination,
