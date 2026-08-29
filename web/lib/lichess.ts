@@ -1,3 +1,5 @@
+import { Chess } from 'chess.js';
+
 const pgnFiles = import.meta.glob('../../pgn/*.pgn', {
   eager: true,
   import: 'default',
@@ -16,6 +18,35 @@ export type GameRow = {
   result: 'Победа' | 'Поражение' | 'Ничья';
 };
 
+export type GameMove = {
+  ply: number;
+  san: string;
+  from: string;
+  to: string;
+  fen: string;
+  clockSeconds: number | null;
+  whiteClockSeconds: number | null;
+  blackClockSeconds: number | null;
+  materialBalance: number;
+};
+
+export type GamePlayer = {
+  name: string;
+  rating: number | null;
+};
+
+export type GameDetails = GameRow & {
+  white: GamePlayer;
+  black: GamePlayer;
+  playerColor: 'white' | 'black';
+  initialFen: string;
+  initialClockSeconds: number | null;
+  initialMaterialBalance: number;
+  moves: GameMove[];
+  siteUrl?: string;
+  termination?: string;
+};
+
 export type GamesPage = {
   games: GameRow[];
   page: number;
@@ -25,6 +56,8 @@ export type GamesPage = {
 type ParsedGame = GameRow & {
   speed?: GameSpeed;
   resultKey: GameResult;
+  tags: Record<string, string>;
+  pgn: string;
 };
 
 const PAGE_SIZE = 20;
@@ -81,13 +114,48 @@ function ratingDiffFromTags(tags: Record<string, string>, playerIsWhite: boolean
   return rawRatingDiff && Number.isFinite(ratingDiff) ? ratingDiff : null;
 }
 
+function ratingFromTag(value: string | undefined) {
+  const rating = Number(value);
+  return value && Number.isFinite(rating) ? rating : null;
+}
+
+function initialClockFromTag(value: string | undefined) {
+  if (!value || value === '-') return null;
+  const initialSeconds = Number(value.split('+')[0]);
+  return Number.isFinite(initialSeconds) ? initialSeconds : null;
+}
+
+function clockFromComment(comment: string | undefined) {
+  const match = comment?.match(/\[%clk\s+(\d+):(\d+):(\d+(?:\.\d+)?)\]/);
+  if (!match) return null;
+
+  const [, hours, minutes, seconds] = match;
+  return Number(hours) * 3600 + Number(minutes) * 60 + Number(seconds);
+}
+
+function materialBalanceFromFen(fen: string) {
+  const pieceValues: Record<string, number> = {
+    p: 1,
+    n: 3,
+    b: 3,
+    r: 5,
+    q: 9,
+  };
+
+  return [...fen.split(' ')[0]].reduce((balance, piece) => {
+    const value = pieceValues[piece.toLowerCase()] ?? 0;
+    if (value === 0) return balance;
+    return piece === piece.toUpperCase() ? balance + value : balance - value;
+  }, 0);
+}
+
 function parsePgn(source: string, username: string): ParsedGame[] {
   return source
     .trim()
     .split(/\r?\n\r?\n(?=\[Event )/)
-    .map(parseTags)
-    .filter((tags) => tags.Event && tags.White && tags.Black && tags.Result)
-    .map((tags) => {
+    .map((pgn) => ({ pgn, tags: parseTags(pgn) }))
+    .filter(({ tags }) => tags.Event && tags.White && tags.Black && tags.Result)
+    .map(({ pgn, tags }) => {
       const playerIsWhite = tags.White.toLowerCase() === username.toLowerCase();
       const opponent = playerIsWhite ? tags.Black : tags.White;
       const resultKey = resultFromTags(tags, username);
@@ -106,6 +174,8 @@ function parsePgn(source: string, username: string): ParsedGame[] {
         result,
         resultKey,
         speed: speedFromTags(tags),
+        tags,
+        pgn,
       };
     })
     .sort((first, second) => second.playedAt - first.playedAt);
@@ -148,5 +218,64 @@ export function getRecentGames(
     games: filteredGames.slice(start, start + PAGE_SIZE),
     page,
     hasNext: filteredGames.length > start + PAGE_SIZE,
+  };
+}
+
+export function getGameById(username: string, id: string): GameDetails | undefined {
+  const game = gamesFor(username).find((candidate) => candidate.id === id);
+  if (!game) return undefined;
+
+  const chess = new Chess();
+  chess.loadPgn(game.pgn);
+  const history = chess.history({ verbose: true });
+  const initialFen = history[0]?.before ?? new Chess().fen();
+  const initialClockSeconds = initialClockFromTag(game.tags.TimeControl);
+  const commentsByFen = new Map(
+    chess.getComments().map(({ fen, comment }) => [fen, comment]),
+  );
+  let whiteClockSeconds = initialClockSeconds;
+  let blackClockSeconds = initialClockSeconds;
+  const moves = history.map((move, index): GameMove => {
+    const clockSeconds = clockFromComment(commentsByFen.get(move.after));
+    if (move.color === 'w' && clockSeconds !== null) whiteClockSeconds = clockSeconds;
+    if (move.color === 'b' && clockSeconds !== null) blackClockSeconds = clockSeconds;
+
+    return {
+      ply: index + 1,
+      san: move.san,
+      from: move.from,
+      to: move.to,
+      fen: move.after,
+      clockSeconds,
+      whiteClockSeconds,
+      blackClockSeconds,
+      materialBalance: materialBalanceFromFen(move.after),
+    };
+  });
+
+  return {
+    id: game.id,
+    playedAt: game.playedAt,
+    control: game.control,
+    opponent: game.opponent,
+    ratingDiff: game.ratingDiff,
+    result: game.result,
+    white: {
+      name: game.tags.White,
+      rating: ratingFromTag(game.tags.WhiteElo),
+    },
+    black: {
+      name: game.tags.Black,
+      rating: ratingFromTag(game.tags.BlackElo),
+    },
+    playerColor: game.tags.White.toLowerCase() === username.toLowerCase()
+      ? 'white'
+      : 'black',
+    initialFen,
+    initialClockSeconds,
+    initialMaterialBalance: materialBalanceFromFen(initialFen),
+    moves,
+    siteUrl: game.tags.Site,
+    termination: game.tags.Termination,
   };
 }

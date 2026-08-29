@@ -1,6 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import Link from 'next/link';
 import {
   getRecentGames,
   type GameResult,
@@ -139,7 +140,12 @@ export function GamesList({ username }: { username: string }) {
             <span>Результат / рейтинг</span>
           </div>
           {games.map((game) => (
-            <article className="game-row" key={game.id}>
+            <Link
+              aria-label={`Открыть партию против ${game.opponent}, результат: ${game.result}`}
+              className="game-row"
+              href={`/games/${encodeURIComponent(game.id)}`}
+              key={game.id}
+            >
               <div className="date-cell">
                 <time dateTime={new Date(game.playedAt).toISOString()}>
                   <span>{dateFormatter.format(game.playedAt)}</span>
@@ -160,7 +166,7 @@ export function GamesList({ username }: { username: string }) {
                 <ResultBadge result={game.result} />
                 <RatingChange value={game.ratingDiff} />
               </div>
-            </article>
+            </Link>
           ))}
         </div>
       )}
