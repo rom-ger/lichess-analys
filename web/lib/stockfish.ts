@@ -2,7 +2,7 @@ import { Chess } from 'chess.js';
 import type { PositionEvaluation } from './lichess';
 
 export const STOCKFISH_VERSION = '18-lite';
-export const STOCKFISH_DEPTH = 14;
+export const STOCKFISH_DEPTH = 18;
 
 const STOCKFISH_READY_TIMEOUT_MS = 20_000;
 const STOCKFISH_ANALYSIS_TIMEOUT_MS = 45_000;
