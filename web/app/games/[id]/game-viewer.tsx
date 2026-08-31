@@ -18,6 +18,7 @@ import {
   STOCKFISH_DEPTH,
   type StockfishAnalysis,
 } from '../../../lib/stockfish';
+import { loadSavedGameAnalysis } from '../../../lib/saved-analysis';
 
 const files = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
 const ranks = ['8', '7', '6', '5', '4', '3', '2', '1'];
@@ -301,6 +302,23 @@ export function GameViewer({ gameId, username }: { gameId: string; username: str
 
   useEffect(() => () => analysisAbortRef.current?.abort(), []);
 
+  useEffect(() => {
+    let cancelled = false;
+    if (!game) return undefined;
+
+    const expectedFens = [game.initialFen, ...game.moves.map((move) => move.fen)];
+
+    void loadSavedGameAnalysis(gameId, expectedFens).then((saved) => {
+      if (!cancelled && saved) {
+        setEngineAnalysisByPly((current) => ({ ...saved, ...current }));
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [game, gameId]);
+
   if (!game) {
     return (
       <div className="state-message game-state-message">
@@ -390,7 +408,8 @@ export function GameViewer({ gameId, username }: { gameId: string; username: str
     setAnalysisStatus({ kind: 'position', ply: currentPly });
 
     try {
-      const analysis = await analyzePly(currentPly, controller.signal);
+      const analysis = engineAnalysisByPly[currentPly]
+        ?? await analyzePly(currentPly, controller.signal);
       if (controller.signal.aborted) return;
       setEngineAnalysisByPly((current) => ({ ...current, [currentPly]: analysis }));
       setAnalysisStatus({ kind: 'idle' });

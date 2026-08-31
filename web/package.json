@@ -6,6 +6,8 @@
     "node": ">=22.13.0"
   },
   "scripts": {
+    "preanalyze:pgn": "node scripts/check-node-version.mjs",
+    "analyze:pgn": "node scripts/analyze-pgn.mjs",
     "predev": "node scripts/check-node-version.mjs && node scripts/sync-stockfish-assets.mjs",
     "dev": "vinext dev",
     "prebuild": "node scripts/check-node-version.mjs && node scripts/sync-stockfish-assets.mjs",
