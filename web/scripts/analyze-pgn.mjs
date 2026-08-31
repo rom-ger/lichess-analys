@@ -260,6 +260,11 @@ class UciEngine {
       this.stderr = `${this.stderr}${chunk}`.slice(-4_000);
     });
     this.child.on('error', (error) => this.fail(error));
+    this.child.stdin.on('error', (error) => {
+      // A process can close its input between the writable check and write().
+      // During an intentional shutdown EPIPE is expected and can be ignored.
+      if (!this.closing) this.fail(error);
+    });
     this.exitPromise = new Promise((resolveExit) => {
       this.child.once('exit', (code, signal) => {
         resolveExit();
@@ -274,6 +279,21 @@ class UciEngine {
 
     await this.commandUntil('uci', (line) => line === 'uciok', ENGINE_READY_TIMEOUT_MS);
     await this.commandUntil('isready', (line) => line === 'readyok', ENGINE_READY_TIMEOUT_MS);
+  }
+
+  write(command) {
+    const child = this.child;
+    if (
+      !child
+      || child.exitCode !== null
+      || child.signalCode !== null
+      || !child.stdin.writable
+      || child.stdin.destroyed
+      || child.stdin.writableEnded
+    ) {
+      throw new Error(`${this.label} недоступен.`);
+    }
+    child.stdin.write(`${command}\n`);
   }
 
   handleChunk(chunk) {
@@ -337,7 +357,13 @@ class UciEngine {
         resolve: resolveCommand,
         timeout,
       };
-      this.child.stdin.write(`${command}\n`);
+      try {
+        this.write(command);
+      } catch (error) {
+        clearTimeout(timeout);
+        this.waiter = null;
+        rejectCommand(error);
+      }
     });
   }
 
@@ -362,8 +388,12 @@ class UciEngine {
         resolve: resolveAnalysis,
         timeout,
       };
-      this.child.stdin.write(`position fen ${fen}\n`);
-      this.child.stdin.write(`go depth ${depth}\n`);
+      try {
+        this.write(`position fen ${fen}`);
+        this.write(`go depth ${depth}`);
+      } catch (error) {
+        this.fail(error);
+      }
     });
   }
 
@@ -381,14 +411,21 @@ class UciEngine {
   }
 
   async close() {
-    if (!this.child) return;
+    const child = this.child;
+    if (!child) return;
     this.closing = true;
-    if (this.child.stdin.writable) this.child.stdin.write('quit\n');
+    if (child.exitCode === null && child.signalCode === null) {
+      try {
+        this.write('quit');
+      } catch {
+        // The engine already stopped accepting commands; wait for exit below.
+      }
+    }
     await Promise.race([
       this.exitPromise,
       new Promise((resolveTimeout) => setTimeout(resolveTimeout, 2_000)),
     ]);
-    if (this.child.exitCode === null && this.child.signalCode === null) this.child.kill();
+    if (child.exitCode === null && child.signalCode === null) child.kill();
   }
 }
 
