@@ -8,6 +8,20 @@ import {
   type GameRow,
   type GameSpeed,
 } from '../lib/lichess';
+import type { QualityFilters } from '../lib/statistics';
+import { QualityDashboard } from './quality-dashboard';
+
+type Period = '30d' | '90d' | 'year' | 'all' | 'custom';
+
+const DAY_MS = 24 * 60 * 60 * 1_000;
+
+const periodFilters: Array<{ value: Period; label: string }> = [
+  { value: '30d', label: '30 дней' },
+  { value: '90d', label: '90 дней' },
+  { value: 'year', label: 'Этот год' },
+  { value: 'all', label: 'Всё время' },
+  { value: 'custom', label: 'Свой период' },
+];
 
 const speedFilters: Array<{ value: GameSpeed | ''; label: string }> = [
   { value: '', label: 'Все' },
@@ -65,18 +79,60 @@ function RatingChange({ value }: { value: GameRow['ratingDiff'] }) {
   );
 }
 
+function moscowDateStart(value: string) {
+  const timestamp = Date.parse(`${value}T00:00:00+03:00`);
+  return Number.isNaN(timestamp) ? undefined : timestamp;
+}
+
+function rangeFor(period: Period, customFrom: string, customTo: string) {
+  const now = Date.now();
+  if (period === '30d') return { from: now - 30 * DAY_MS, to: now + 1 };
+  if (period === '90d') return { from: now - 90 * DAY_MS, to: now + 1 };
+  if (period === 'year') {
+    const year = new Intl.DateTimeFormat('en', {
+      timeZone: 'Europe/Moscow',
+      year: 'numeric',
+    }).format(now);
+    return { from: Date.parse(`${year}-01-01T00:00:00+03:00`), to: now + 1 };
+  }
+  if (period === 'custom') {
+    const from = customFrom ? moscowDateStart(customFrom) : undefined;
+    const toStart = customTo ? moscowDateStart(customTo) : undefined;
+    return { from, to: toStart === undefined ? undefined : toStart + DAY_MS };
+  }
+  return {};
+}
+
 export function GamesList({ username }: { username: string }) {
+  const [period, setPeriod] = useState<Period>('90d');
+  const [customFrom, setCustomFrom] = useState('');
+  const [customTo, setCustomTo] = useState('');
   const [speed, setSpeed] = useState<GameSpeed | ''>('');
   const [result, setResult] = useState<GameResult | ''>('');
   const [page, setPage] = useState(1);
-  const { games, hasNext } = useMemo(
+  const range = useMemo(
+    () => rangeFor(period, customFrom, customTo),
+    [customFrom, customTo, period],
+  );
+  const qualityFilters = useMemo<QualityFilters>(() => ({
+    ...range,
+    speed: speed || undefined,
+    result: result || undefined,
+  }), [range, result, speed]);
+  const { games, hasNext, total } = useMemo(
     () => getRecentGames(username, {
       page,
       speed: speed || undefined,
       result: result || undefined,
+      ...range,
     }),
-    [page, result, speed, username],
+    [page, range, result, speed, username],
   );
+
+  function changePeriod(nextPeriod: Period) {
+    setPeriod(nextPeriod);
+    setPage(1);
+  }
 
   function changeSpeed(nextSpeed: GameSpeed | '') {
     setSpeed(nextSpeed);
@@ -91,6 +147,50 @@ export function GamesList({ username }: { username: string }) {
   return (
     <div>
       <div className="filters" aria-label="Фильтры партий">
+        <fieldset className="filter-group filter-group--period">
+          <legend>Период</legend>
+          <div className="filter-options">
+            {periodFilters.map((filter) => (
+              <button
+                className="filter-chip"
+                aria-pressed={period === filter.value}
+                key={filter.value}
+                onClick={() => changePeriod(filter.value)}
+                type="button"
+              >
+                {filter.label}
+              </button>
+            ))}
+          </div>
+          {period === 'custom' && (
+            <div className="custom-period">
+              <label>
+                <span>С</span>
+                <input
+                  onChange={(event) => {
+                    setCustomFrom(event.target.value);
+                    setPage(1);
+                  }}
+                  type="date"
+                  value={customFrom}
+                />
+              </label>
+              <label>
+                <span>По</span>
+                <input
+                  min={customFrom || undefined}
+                  onChange={(event) => {
+                    setCustomTo(event.target.value);
+                    setPage(1);
+                  }}
+                  type="date"
+                  value={customTo}
+                />
+              </label>
+            </div>
+          )}
+        </fieldset>
+
         <fieldset className="filter-group">
           <legend>Контроль</legend>
           <div className="filter-options">
@@ -125,6 +225,8 @@ export function GamesList({ username }: { username: string }) {
           </div>
         </fieldset>
       </div>
+
+      <QualityDashboard filters={qualityFilters} username={username} />
 
       {games.length === 0 ? (
         <div className="state-message">
@@ -181,7 +283,7 @@ export function GamesList({ username }: { username: string }) {
           >
             Назад
           </button>
-          <span>Страница {page}</span>
+          <span>Страница {page} · {total} партий</span>
           <button
             className="page-button"
             disabled={!hasNext}

@@ -61,6 +61,7 @@ export type GamesPage = {
   games: GameRow[];
   page: number;
   hasNext: boolean;
+  total: number;
 };
 
 type ParsedGame = GameRow & {
@@ -261,13 +262,21 @@ function gamesFor(username: string) {
 
 export function getRecentGames(
   username: string,
-  options: { page: number; speed?: GameSpeed; result?: GameResult },
+  options: {
+    page: number;
+    speed?: GameSpeed;
+    result?: GameResult;
+    from?: number;
+    to?: number;
+  },
 ): GamesPage {
   const page = Math.max(1, options.page);
   const filteredGames = gamesFor(username).filter((game) => {
     const matchesSpeed = !options.speed || game.speed === options.speed;
     const matchesResult = !options.result || game.resultKey === options.result;
-    return matchesSpeed && matchesResult;
+    const matchesFrom = options.from === undefined || game.playedAt >= options.from;
+    const matchesTo = options.to === undefined || game.playedAt < options.to;
+    return matchesSpeed && matchesResult && matchesFrom && matchesTo;
   });
   const start = (page - 1) * PAGE_SIZE;
 
@@ -275,6 +284,7 @@ export function getRecentGames(
     games: filteredGames.slice(start, start + PAGE_SIZE),
     page,
     hasNext: filteredGames.length > start + PAGE_SIZE,
+    total: filteredGames.length,
   };
 }
 
