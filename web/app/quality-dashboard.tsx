@@ -3,12 +3,15 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   loadStatisticsIndex,
+  summarizeAdvantage,
+  summarizeDefense,
   summarizePhases,
   summarizeQuality,
   type GamePhase,
   type QualityFilters,
   type QualityGame,
 } from '../lib/statistics';
+import { ExtendedDashboard } from './extended-dashboard';
 
 type MetricCardProps = {
   label: string;
@@ -68,6 +71,12 @@ const phaseLabels: Record<GamePhase, string> = {
   endgame: 'Эндшпиль',
 };
 
+const defenseBandLabels = {
+  35: 'Сложная позиция',
+  20: 'Проигранная позиция',
+  5: 'Почти безнадёжная',
+} as const;
+
 export function QualityDashboard({
   filters,
   username,
@@ -104,6 +113,14 @@ export function QualityDashboard({
     () => games ? summarizePhases(games, username, filters) : null,
     [filters, games, username],
   );
+  const advantageOverview = useMemo(
+    () => games ? summarizeAdvantage(games, username, filters) : null,
+    [filters, games, username],
+  );
+  const defenseOverview = useMemo(
+    () => games ? summarizeDefense(games, username, filters) : null,
+    [filters, games, username],
+  );
 
   if (error) {
     return <div className="quality-state quality-state--error">{error}</div>;
@@ -122,6 +139,8 @@ export function QualityDashboard({
     )) ?? [];
   const strongestPhase = rankedPhases.at(0)?.phase;
   const weakestPhase = rankedPhases.at(-1)?.phase;
+  const winningBand = advantageOverview?.bands.find((band) => band.threshold === 80);
+  const losingBand = defenseOverview?.bands.find((band) => band.threshold === 20);
 
   return (
     <>
@@ -250,6 +269,222 @@ export function QualityDashboard({
           </div>
         </section>
       )}
+
+      {advantageOverview && (
+        <section className="advantage-dashboard" aria-labelledby="advantage-title">
+          <header className="quality-heading advantage-heading">
+            <div>
+              <p className="eyebrow">Группа 3</p>
+              <h2 id="advantage-title">Реализация преимущества</h2>
+            </div>
+            {winningBand && winningBand.games > 0 && (
+              <p>
+                Реализовано <strong>{winningBand.wins}</strong> из{' '}
+                <strong>{winningBand.games}</strong> выигранных позиций
+              </p>
+            )}
+          </header>
+
+          <div className="advantage-summary">
+            <article className="advantage-card advantage-card--primary">
+              <span>Конверсия при 80%+</span>
+              <strong>{formatPercent(winningBand?.conversionRate ?? null, 0)}</strong>
+              <p>{advantageOverview.convertedGames} побед из {advantageOverview.winningPositions} партий</p>
+            </article>
+            <article className="advantage-card">
+              <span>Упущено</span>
+              <strong>{advantageOverview.squanderedGames}</strong>
+              <p>
+                {advantageOverview.squanderedDraws} ничьих ·{' '}
+                {advantageOverview.squanderedLosses} поражений
+              </p>
+            </article>
+            <article className="advantage-card">
+              <span>Чистая реализация</span>
+              <strong>{formatPercent(advantageOverview.cleanConversionRate, 0)}</strong>
+              <p>побед без новых ошибок и зевков после перевеса</p>
+            </article>
+            <article className="advantage-card">
+              <span>Лучший шанс в поражениях</span>
+              <strong>{formatPercent(advantageOverview.averagePeakInLosses, 0)}</strong>
+              <p>средний пик шансов в проигранных партиях</p>
+            </article>
+          </div>
+
+          <div className="conversion-panel">
+            <header>
+              <div>
+                <h3>Конверсия по силе позиции</h3>
+                <p>Как часто преимущество каждого уровня превращается в победу</p>
+              </div>
+              <small>Показываем размер выборки для каждого порога</small>
+            </header>
+            <div className="conversion-bands">
+              {advantageOverview.bands.map((band) => (
+                <article key={band.threshold}>
+                  <div className="conversion-band-title">
+                    <span>Шансы {band.threshold}%+</span>
+                    <strong>{formatPercent(band.conversionRate, 0)}</strong>
+                  </div>
+                  <div className="conversion-track" aria-hidden="true">
+                    <span style={{ width: `${band.conversionRate ?? 0}%` }} />
+                  </div>
+                  <p>
+                    {band.games} партий · {band.wins} побед · {band.draws} ничьих ·{' '}
+                    {band.losses} поражений
+                  </p>
+                </article>
+              ))}
+            </div>
+          </div>
+
+          <div className="advantage-followup">
+            <article>
+              <span>Первые 5 решений</span>
+              <strong>{formatPercent(advantageOverview.firstFiveAccuracy)}</strong>
+              <p>точность на {advantageOverview.firstFiveMoves} ходах после достижения 80%</p>
+              <small>
+                Потеря шансов за ход: {formatOptional(advantageOverview.firstFiveWinPercentLoss)}
+              </small>
+            </article>
+            <article>
+              <span>Удержание перевеса</span>
+              <strong>{formatOptional(advantageOverview.postAdvantageSeriousErrorsPer100)}</strong>
+              <p>ошибок и зевков на 100 ходов после достижения 80%</p>
+              <small>
+                В среднем преимущество возникает на {formatOptional(advantageOverview.averageFirstWinningMove)} ходу
+              </small>
+            </article>
+            <aside>
+              <strong>Что считается выигранной позицией</strong>
+              <p>
+                Позиция, в которой Stockfish оценивает ваши шансы на победу не ниже
+                80%. Упущенной считается такая партия, если она закончилась ничьей
+                или поражением.
+              </p>
+            </aside>
+          </div>
+        </section>
+      )}
+
+      {defenseOverview && (
+        <section className="defense-dashboard" aria-labelledby="defense-title">
+          <header className="quality-heading defense-heading">
+            <div>
+              <p className="eyebrow">Группа 4</p>
+              <h2 id="defense-title">Защита плохих позиций</h2>
+            </div>
+            {losingBand && losingBand.games > 0 && (
+              <p>
+                Спасено <strong>{losingBand.saved}</strong> из{' '}
+                <strong>{losingBand.games}</strong> проигранных позиций
+              </p>
+            )}
+          </header>
+
+          <div className="defense-summary">
+            <article className="defense-card defense-card--primary">
+              <span>Процент спасения</span>
+              <strong>{formatPercent(losingBand?.saveRate ?? null, 0)}</strong>
+              <p>результат не проигран после падения шансов до 20%</p>
+            </article>
+            <article className="defense-card">
+              <span>Спасено партий</span>
+              <strong>{defenseOverview.savedGames}</strong>
+              <p>{defenseOverview.savedWins} побед · {defenseOverview.savedDraws} ничьих</p>
+            </article>
+            <article className="defense-card">
+              <span>Возвращение в игру</span>
+              <strong>{formatPercent(defenseOverview.recoveryRate, 0)}</strong>
+              <p>позиций, где шансы снова поднимались хотя бы до 45%</p>
+            </article>
+            <article className="defense-card">
+              <span>Длина сопротивления</span>
+              <strong>{formatOptional(defenseOverview.averageResistanceMoves)}</strong>
+              <p>ваших ходов после первого падения ниже 20%</p>
+            </article>
+          </div>
+
+          <div className="defense-panel">
+            <header>
+              <div>
+                <h3>Спасение по тяжести позиции</h3>
+                <p>Победы и ничьи после попадания под разные пороги</p>
+              </div>
+              <small>Чем ниже порог, тем тяжелее исходная позиция</small>
+            </header>
+            <div className="defense-bands">
+              {defenseOverview.bands.map((band) => (
+                <article key={band.threshold}>
+                  <div className="defense-band-title">
+                    <span>{defenseBandLabels[band.threshold]} · ≤{band.threshold}%</span>
+                    <strong>{formatPercent(band.saveRate, 0)}</strong>
+                  </div>
+                  <div className="defense-track" aria-hidden="true">
+                    <span style={{ width: `${band.saveRate ?? 0}%` }} />
+                  </div>
+                  <p>
+                    {band.games} партий · {band.wins} побед · {band.draws} ничьих ·{' '}
+                    {band.losses} поражений
+                  </p>
+                </article>
+              ))}
+            </div>
+          </div>
+
+          <div className="defense-followup">
+            <article>
+              <span>Первые 5 ходов под давлением</span>
+              <strong>{formatPercent(defenseOverview.firstFiveAccuracy)}</strong>
+              <p>точность на {defenseOverview.firstFiveMoves} ходах после падения ниже 20%</p>
+              <small>
+                Потеря шансов: {formatOptional(defenseOverview.firstFiveWinPercentLoss)} за ход
+              </small>
+            </article>
+            <article>
+              <span>Следующие ходы после зевка</span>
+              <strong>{formatPercent(defenseOverview.postBlunderAccuracy)}</strong>
+              <p>точность на {defenseOverview.postBlunderMoves} последующих решениях</p>
+              <small>
+                Потеря шансов: {formatOptional(defenseOverview.postBlunderWinPercentLoss)} за ход
+              </small>
+            </article>
+            <article>
+              <span>Цепочка ошибок</span>
+              <strong>{formatPercent(defenseOverview.errorCascadeRate, 0)}</strong>
+              <p>партий, где за зевком следовала новая ошибка в течение трёх ходов</p>
+              <small>Выборка: {defenseOverview.blunderedGames} партий с ходами после зевка</small>
+            </article>
+          </div>
+
+          <div className="defense-ending">
+            <p>
+              <strong>{defenseOverview.lossesWithChances}</strong>
+              <span>поражений закончились, когда движок ещё оставлял не менее 10% шансов</span>
+            </p>
+            <p>
+              <strong>{defenseOverview.prolongedHopelessGames}</strong>
+              <span>
+                из {defenseOverview.hopelessGames} почти безнадёжных партий продолжались ещё минимум 10 ваших ходов
+              </span>
+            </p>
+            <aside>
+              <strong>Как читается этот блок</strong>
+              <p>
+                Проигранной считается позиция с шансами не выше 20%. Возвратом в
+                игру — последующий подъём до 45%. Средний момент первого попадания
+                в такую позицию: {formatOptional(defenseOverview.averageFirstLosingMove)} ход.
+              </p>
+              <small>
+                После попадания в плохую позицию: {formatOptional(defenseOverview.postDisadvantageSeriousErrorsPer100)}
+                {' '}ошибок и зевков на 100 ходов
+              </small>
+            </aside>
+          </div>
+        </section>
+      )}
+
+      {games && <ExtendedDashboard filters={filters} games={games} username={username} />}
     </>
   );
 }
