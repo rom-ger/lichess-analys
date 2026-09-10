@@ -1,7 +1,7 @@
 import type { GameResult, GameSpeed } from './lichess';
 import { STOCKFISH_DEPTH, STOCKFISH_VERSION } from './stockfish';
 
-const STATISTICS_SCHEMA_VERSION = 8;
+const STATISTICS_SCHEMA_VERSION = 9;
 const STATISTICS_URL = `/analysis/stockfish-${STOCKFISH_VERSION}-depth-${STOCKFISH_DEPTH}/statistics.json?v=${STATISTICS_SCHEMA_VERSION}`;
 
 export type AnalysisFilters = {
@@ -21,8 +21,8 @@ export type LostOpening = {
   moveNumber: number;
   playedMove: string;
   bestMove: string | null;
-  winPercentLoss: number;
-  afterWinPercent: number;
+  evaluationLoss: number;
+  afterEvaluation: number;
   badUntil: BadUntil;
   badUntilPly: number;
   opponentBlunderMove: string | null;
@@ -52,9 +52,9 @@ export type DecisiveEndgameError = {
   moveNumber: number;
   playedMove: string;
   bestMove: string | null;
-  beforeWinPercent: number;
-  afterWinPercent: number;
-  winPercentLoss: number;
+  beforeEvaluation: number;
+  afterEvaluation: number;
+  evaluationLoss: number;
 };
 
 export type StatisticsGame = {
@@ -74,14 +74,14 @@ export type StatisticsIndex = {
   generatedAt: string;
   opening: {
     plies: number;
-    minimumWinPercentLoss: number;
-    badPositionMaxWinPercent: number;
-    recoveredPositionMinWinPercent: number;
+    minimumEvaluationLoss: number;
+    badPositionMaxEvaluation: number;
+    recoveredPositionMinEvaluation: number;
     opponentBlunderLoss: number;
   };
   endgame: {
-    notLostMinWinPercent: number;
-    lostMaxWinPercent: number;
+    notLostMinEvaluation: number;
+    lostMaxEvaluation: number;
   };
   games: StatisticsGame[];
 };
@@ -97,8 +97,8 @@ export type FrequentLostOpening = {
   fen: string;
   color: PlayerColor;
   games: number;
-  averageWinPercentLoss: number;
-  averageAfterWinPercent: number;
+  averageEvaluationLoss: number;
+  averageAfterEvaluation: number;
   playedMove: string;
   playedMoveCount: number;
   bestMove: string | null;
@@ -140,8 +140,8 @@ type LostOpeningGroup = {
   fen: string;
   color: PlayerColor;
   gameIds: Set<string>;
-  totalWinPercentLoss: number;
-  totalAfterWinPercent: number;
+  totalEvaluationLoss: number;
+  totalAfterEvaluation: number;
   playedMoves: Map<string, number>;
   bestMoves: Map<string, number>;
   examples: LostOpeningExample[];
@@ -161,6 +161,16 @@ export function resultFor(game: StatisticsGame, username: string): GameResult {
   const won = (color === 'white' && game.result === '1-0')
     || (color === 'black' && game.result === '0-1');
   return won ? 'win' : 'loss';
+}
+
+export function formatCentipawnEvaluation(value: number) {
+  if (Math.abs(value) >= 90_000) {
+    const mateDistance = Math.max(1, Math.round((100_000 - Math.abs(value)) / 100));
+    return `${value > 0 ? '+' : '−'}M${mateDistance}`;
+  }
+  const pawns = value / 100;
+  if (Math.abs(pawns) < 0.005) return '0.00';
+  return `${pawns > 0 ? '+' : '−'}${Math.abs(pawns).toFixed(2)}`;
 }
 
 function selectGames(
@@ -213,16 +223,16 @@ export function summarizeLostOpenings(
       fen: opening.fen,
       color,
       gameIds: new Set<string>(),
-      totalWinPercentLoss: 0,
-      totalAfterWinPercent: 0,
+      totalEvaluationLoss: 0,
+      totalAfterEvaluation: 0,
       playedMoves: new Map<string, number>(),
       bestMoves: new Map<string, number>(),
       examples: [],
     };
 
     group.gameIds.add(game.gameId);
-    group.totalWinPercentLoss += opening.winPercentLoss;
-    group.totalAfterWinPercent += opening.afterWinPercent;
+    group.totalEvaluationLoss += opening.evaluationLoss;
+    group.totalAfterEvaluation += opening.afterEvaluation;
     increment(group.playedMoves, opening.playedMove);
     increment(group.bestMoves, opening.bestMove);
     group.examples.push({
@@ -243,8 +253,8 @@ export function summarizeLostOpenings(
         fen: group.fen,
         color: group.color,
         games: group.gameIds.size,
-        averageWinPercentLoss: group.totalWinPercentLoss / group.gameIds.size,
-        averageAfterWinPercent: group.totalAfterWinPercent / group.gameIds.size,
+        averageEvaluationLoss: group.totalEvaluationLoss / group.gameIds.size,
+        averageAfterEvaluation: group.totalAfterEvaluation / group.gameIds.size,
         playedMove: playedMove?.[0] ?? '—',
         playedMoveCount: playedMove?.[1] ?? 0,
         bestMove: bestMove?.[0] ?? null,
@@ -253,8 +263,8 @@ export function summarizeLostOpenings(
     })
     .sort((first, second) => (
       second.games - first.games
-      || first.averageAfterWinPercent - second.averageAfterWinPercent
-      || second.averageWinPercentLoss - first.averageWinPercentLoss
+      || first.averageAfterEvaluation - second.averageAfterEvaluation
+      || second.averageEvaluationLoss - first.averageEvaluationLoss
       || first.positionKey.localeCompare(second.positionKey)
     ));
 

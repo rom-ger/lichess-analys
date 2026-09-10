@@ -36,7 +36,7 @@ export type GameMove = {
   materialBalance: number;
   evaluation: PositionEvaluation | null;
   judgement: MoveJudgement | null;
-  winPercentLoss: number | null;
+  evaluationLoss: number | null;
 };
 
 export type GamePlayer = {
@@ -158,12 +158,27 @@ function evaluationFromComment(comment: string | undefined): PositionEvaluation 
   return Number.isFinite(value) ? { kind: 'centipawns', value: Math.round(value) } : null;
 }
 
-export function evaluationToWhiteWinPercent(evaluation: PositionEvaluation) {
-  const centipawns = evaluation.kind === 'mate'
-    ? Math.sign(evaluation.value || -1) * 1000
-    : Math.max(-1000, Math.min(1000, evaluation.value));
-  const winningChances = 2 / (1 + Math.exp(-0.00368208 * centipawns)) - 1;
-  return 50 + 50 * winningChances;
+export function evaluationToCentipawns(evaluation: PositionEvaluation) {
+  if (evaluation.kind === 'mate') {
+    const distance = Math.min(99, Math.abs(evaluation.value));
+    return Math.sign(evaluation.value || -1) * (100_000 - distance * 100);
+  }
+  return evaluation.value;
+}
+
+export function evaluationToWhiteBarPercent(evaluation: PositionEvaluation) {
+  const centipawns = Math.max(-500, Math.min(500, evaluationToCentipawns(evaluation)));
+  return 50 + centipawns / 10;
+}
+
+export function formatEvaluation(evaluation: PositionEvaluation | null) {
+  if (!evaluation) return '—';
+  if (evaluation.kind === 'mate') {
+    return evaluation.value > 0 ? `+M${evaluation.value}` : `−M${Math.abs(evaluation.value)}`;
+  }
+  const pawns = evaluation.value / 100;
+  if (Math.abs(pawns) < 0.005) return '0.00';
+  return `${pawns > 0 ? '+' : '−'}${Math.abs(pawns).toFixed(2)}`;
 }
 
 export function classifyMove(
@@ -172,23 +187,23 @@ export function classifyMove(
   mover: 'white' | 'black',
 ) {
   if (!before || !after) {
-    return { judgement: null, winPercentLoss: null };
+    return { judgement: null, evaluationLoss: null };
   }
 
-  const beforeWhite = evaluationToWhiteWinPercent(before);
-  const afterWhite = evaluationToWhiteWinPercent(after);
-  const beforeMover = mover === 'white' ? beforeWhite : 100 - beforeWhite;
-  const afterMover = mover === 'white' ? afterWhite : 100 - afterWhite;
-  const winPercentLoss = Math.max(0, beforeMover - afterMover);
-  const judgement: MoveJudgement | null = winPercentLoss >= 30
+  const beforeWhite = evaluationToCentipawns(before);
+  const afterWhite = evaluationToCentipawns(after);
+  const beforeMover = mover === 'white' ? beforeWhite : -beforeWhite;
+  const afterMover = mover === 'white' ? afterWhite : -afterWhite;
+  const evaluationLoss = Math.max(0, beforeMover - afterMover);
+  const judgement: MoveJudgement | null = evaluationLoss >= 300
     ? 'blunder'
-    : winPercentLoss >= 20
+    : evaluationLoss >= 200
       ? 'mistake'
-      : winPercentLoss >= 10
+      : evaluationLoss >= 100
         ? 'inaccuracy'
         : null;
 
-  return { judgement, winPercentLoss };
+  return { judgement, evaluationLoss };
 }
 
 function materialBalanceFromFen(fen: string) {
@@ -308,7 +323,7 @@ export function getGameById(username: string, id: string): GameDetails | undefin
     const comment = commentsByFen.get(move.after);
     const clockSeconds = clockFromComment(comment);
     const evaluation = evaluationFromComment(comment);
-    const { judgement, winPercentLoss } = classifyMove(
+    const { judgement, evaluationLoss } = classifyMove(
       previousEvaluation,
       evaluation,
       move.color === 'w' ? 'white' : 'black',
@@ -329,7 +344,7 @@ export function getGameById(username: string, id: string): GameDetails | undefin
       materialBalance: materialBalanceFromFen(move.after),
       evaluation,
       judgement,
-      winPercentLoss,
+      evaluationLoss,
     };
   });
 

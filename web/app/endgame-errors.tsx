@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import {
+  formatCentipawnEvaluation,
   loadStatisticsIndex,
   summarizeDecisiveEndgames,
   type AnalysisFilters,
@@ -82,7 +83,8 @@ function EndgameGroup({ group, featured }: { group: DecisiveEndgameGroup; featur
                   <span>{dateFormatter.format(example.playedAt)} · ход {example.moveNumber}</span>
                 </div>
                 <span className="endgame-evaluation-drop">
-                  {example.beforeWinPercent.toFixed(0)}% → {example.afterWinPercent.toFixed(0)}%
+                  {formatCentipawnEvaluation(example.beforeEvaluation)} →{' '}
+                  {formatCentipawnEvaluation(example.afterEvaluation)}
                 </span>
               </header>
               <div className="opening-mistake-answer">
@@ -175,8 +177,9 @@ export function EndgameErrors({
           <span className="endgame-kicker">Где удерживаемая позиция стала проигранной</span>
           <h2 id="endgame-errors-title">Решающие ошибки в эндшпиле</h2>
           <p>
-            До вашего хода было не меньше {index.endgame.notLostMinWinPercent}% шансов,
-            после — не больше {index.endgame.lostMaxWinPercent}%, и затем позиция уже не восстановилась.
+            До вашего хода оценка за вас была не ниже{' '}
+            {formatCentipawnEvaluation(index.endgame.notLostMinEvaluation)}, после — не выше{' '}
+            {formatCentipawnEvaluation(index.endgame.lostMaxEvaluation)}, и затем позиция уже не восстановилась.
           </p>
         </div>
         <div className="endgame-sample">

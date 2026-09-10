@@ -7,12 +7,12 @@ import { Chess } from 'chess.js';
 const ENGINE_VERSION = '18-lite';
 const ENGINE_DEPTH = 18;
 const OPENING_PLIES = 30;
-const MINIMUM_ERROR_LOSS = 10;
-const BAD_POSITION_MAX_WIN_PERCENT = 35;
-const RECOVERED_POSITION_MIN_WIN_PERCENT = 45;
-const OPPONENT_BLUNDER_LOSS = 30;
-const ENDGAME_NOT_LOST_MIN_WIN_PERCENT = 35;
-const ENDGAME_LOST_MAX_WIN_PERCENT = 20;
+const MINIMUM_EVALUATION_LOSS = 100;
+const BAD_POSITION_MAX_EVALUATION = -150;
+const RECOVERED_POSITION_MIN_EVALUATION = -50;
+const OPPONENT_BLUNDER_LOSS = 300;
+const ENDGAME_NOT_LOST_MIN_EVALUATION = -150;
+const ENDGAME_LOST_MAX_EVALUATION = -300;
 
 const webRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const repositoryRoot = join(webRoot, '..');
@@ -60,27 +60,24 @@ function speed(tags) {
 }
 
 function evaluationToCentipawns(evaluation) {
-  if (evaluation.kind === 'mate') return Math.sign(evaluation.value || -1) * 1_000;
-  return Math.max(-1_000, Math.min(1_000, evaluation.value));
+  if (evaluation.kind === 'mate') {
+    const distance = Math.min(99, Math.abs(evaluation.value));
+    return Math.sign(evaluation.value || -1) * (100_000 - distance * 100);
+  }
+  return evaluation.value;
 }
 
-function whiteWinPercent(evaluation) {
-  const centipawns = evaluationToCentipawns(evaluation);
-  const winningChances = 2 / (1 + Math.exp(-0.00368208 * centipawns)) - 1;
-  return 50 + 50 * winningChances;
-}
-
-function winPercentLoss(move, before, after) {
-  const beforeWhite = whiteWinPercent(before.evaluation);
-  const afterWhite = whiteWinPercent(after.evaluation);
-  const beforeMover = move.color === 'w' ? beforeWhite : 100 - beforeWhite;
-  const afterMover = move.color === 'w' ? afterWhite : 100 - afterWhite;
+function evaluationLoss(move, before, after) {
+  const beforeWhite = evaluationToCentipawns(before.evaluation);
+  const afterWhite = evaluationToCentipawns(after.evaluation);
+  const beforeMover = move.color === 'w' ? beforeWhite : -beforeWhite;
+  const afterMover = move.color === 'w' ? afterWhite : -afterWhite;
   return Math.max(0, beforeMover - afterMover);
 }
 
-function winPercentFor(evaluation, color) {
-  const white = whiteWinPercent(evaluation);
-  return color === 'white' ? white : 100 - white;
+function evaluationFor(evaluation, color) {
+  const white = evaluationToCentipawns(evaluation);
+  return color === 'white' ? white : -white;
 }
 
 function positionKey(fen) {
@@ -112,9 +109,9 @@ function lostOpeningForColor(analysis, moves, color) {
 
     const before = analysis.positions[index];
     const after = analysis.positions[index + 1];
-    const loss = winPercentLoss(move, before, after);
-    const afterWinPercent = winPercentFor(after.evaluation, color);
-    if (loss < MINIMUM_ERROR_LOSS || afterWinPercent > BAD_POSITION_MAX_WIN_PERCENT) continue;
+    const loss = evaluationLoss(move, before, after);
+    const afterEvaluation = evaluationFor(after.evaluation, color);
+    if (loss < MINIMUM_EVALUATION_LOSS || afterEvaluation > BAD_POSITION_MAX_EVALUATION) continue;
 
     let ending = { type: 'gameEnd', ply: moves.length, move: null };
     let stayedBad = true;
@@ -126,7 +123,7 @@ function lostOpeningForColor(analysis, moves, color) {
 
       if (
         futureMove.color !== moveColor
-        && winPercentLoss(futureMove, futureBefore, futureAfter) >= OPPONENT_BLUNDER_LOSS
+        && evaluationLoss(futureMove, futureBefore, futureAfter) >= OPPONENT_BLUNDER_LOSS
       ) {
         ending = {
           type: 'opponentBlunder',
@@ -137,8 +134,8 @@ function lostOpeningForColor(analysis, moves, color) {
       }
 
       if (
-        winPercentFor(futureAfter.evaluation, color)
-        >= RECOVERED_POSITION_MIN_WIN_PERCENT
+        evaluationFor(futureAfter.evaluation, color)
+        >= RECOVERED_POSITION_MIN_EVALUATION
       ) {
         stayedBad = false;
         break;
@@ -154,8 +151,8 @@ function lostOpeningForColor(analysis, moves, color) {
       moveNumber: Math.floor(index / 2) + 1,
       playedMove: move.san,
       bestMove: uciToSan(before.fen, before.bestMove),
-      winPercentLoss: Math.round(loss * 10) / 10,
-      afterWinPercent: Math.round(afterWinPercent * 10) / 10,
+      evaluationLoss: loss,
+      afterEvaluation,
       badUntil: ending.type,
       badUntilPly: ending.ply,
       opponentBlunderMove: ending.move,
@@ -281,20 +278,20 @@ function decisiveEndgameForColor(analysis, moves, color) {
     const material = materialFromFen(before.fen);
     if (!isEndgame(material)) continue;
 
-    const beforeWinPercent = winPercentFor(before.evaluation, color);
-    const afterWinPercent = winPercentFor(after.evaluation, color);
+    const beforeEvaluation = evaluationFor(before.evaluation, color);
+    const afterEvaluation = evaluationFor(after.evaluation, color);
     if (
-      beforeWinPercent < ENDGAME_NOT_LOST_MIN_WIN_PERCENT
-      || afterWinPercent > ENDGAME_LOST_MAX_WIN_PERCENT
+      beforeEvaluation < ENDGAME_NOT_LOST_MIN_EVALUATION
+      || afterEvaluation > ENDGAME_LOST_MAX_EVALUATION
     ) continue;
 
     let recovered = false;
     for (let futureIndex = index + 1; futureIndex < moves.length; futureIndex += 1) {
-      const futureWinPercent = winPercentFor(
+      const futureEvaluation = evaluationFor(
         analysis.positions[futureIndex + 1].evaluation,
         color,
       );
-      if (futureWinPercent >= ENDGAME_NOT_LOST_MIN_WIN_PERCENT) {
+      if (futureEvaluation >= ENDGAME_NOT_LOST_MIN_EVALUATION) {
         recovered = true;
         break;
       }
@@ -308,9 +305,9 @@ function decisiveEndgameForColor(analysis, moves, color) {
       moveNumber: Math.floor(index / 2) + 1,
       playedMove: move.san,
       bestMove: uciToSan(before.fen, before.bestMove),
-      beforeWinPercent: Math.round(beforeWinPercent * 10) / 10,
-      afterWinPercent: Math.round(afterWinPercent * 10) / 10,
-      winPercentLoss: Math.round((beforeWinPercent - afterWinPercent) * 10) / 10,
+      beforeEvaluation,
+      afterEvaluation,
+      evaluationLoss: beforeEvaluation - afterEvaluation,
     };
   }
 
@@ -383,19 +380,19 @@ async function main() {
 
   const temporaryFile = join(analysisRoot, `.${randomUUID()}.statistics.json.tmp`);
   await writeFile(temporaryFile, `${JSON.stringify({
-    schemaVersion: 8,
+    schemaVersion: 9,
     engine: manifest.engine,
     generatedAt: new Date().toISOString(),
     opening: {
       plies: OPENING_PLIES,
-      minimumWinPercentLoss: MINIMUM_ERROR_LOSS,
-      badPositionMaxWinPercent: BAD_POSITION_MAX_WIN_PERCENT,
-      recoveredPositionMinWinPercent: RECOVERED_POSITION_MIN_WIN_PERCENT,
+      minimumEvaluationLoss: MINIMUM_EVALUATION_LOSS,
+      badPositionMaxEvaluation: BAD_POSITION_MAX_EVALUATION,
+      recoveredPositionMinEvaluation: RECOVERED_POSITION_MIN_EVALUATION,
       opponentBlunderLoss: OPPONENT_BLUNDER_LOSS,
     },
     endgame: {
-      notLostMinWinPercent: ENDGAME_NOT_LOST_MIN_WIN_PERCENT,
-      lostMaxWinPercent: ENDGAME_LOST_MAX_WIN_PERCENT,
+      notLostMinEvaluation: ENDGAME_NOT_LOST_MIN_EVALUATION,
+      lostMaxEvaluation: ENDGAME_LOST_MAX_EVALUATION,
     },
     games: statistics,
   })}\n`, 'utf8');

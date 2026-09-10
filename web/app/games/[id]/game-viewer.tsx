@@ -2,10 +2,19 @@
 
 import { Chess, type Square } from 'chess.js';
 import Link from 'next/link';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Dispatch,
+  type MutableRefObject,
+  type SetStateAction,
+} from 'react';
 import {
   classifyMove,
-  evaluationToWhiteWinPercent,
+  evaluationToWhiteBarPercent,
+  formatEvaluation,
   getGameById,
   type GameDetails,
   type GameMove,
@@ -258,16 +267,6 @@ function ChessBoard({
   );
 }
 
-function formatEvaluation(evaluation: PositionEvaluation | null) {
-  if (!evaluation) return '—';
-  if (evaluation.kind === 'mate') {
-    return evaluation.value > 0 ? `+M${evaluation.value}` : `−M${Math.abs(evaluation.value)}`;
-  }
-  const pawns = evaluation.value / 100;
-  if (Math.abs(pawns) < 0.005) return '0.00';
-  return `${pawns > 0 ? '+' : '−'}${Math.abs(pawns).toFixed(2)}`;
-}
-
 const judgementLabels: Record<MoveJudgement, { glyph: string; label: string }> = {
   inaccuracy: { glyph: '?!', label: 'Неточность' },
   mistake: { glyph: '?', label: 'Ошибка' },
@@ -281,7 +280,7 @@ function EvaluationBar({
   evaluation: PositionEvaluation | null;
   orientation: GameDetails['playerColor'];
 }) {
-  const whitePercent = evaluation ? evaluationToWhiteWinPercent(evaluation) : 50;
+  const whitePercent = evaluation ? evaluationToWhiteBarPercent(evaluation) : 50;
 
   return (
     <div
@@ -313,7 +312,7 @@ function EvaluationGraph({
     <div className="evaluation-chart" aria-label="График оценки партии">
       <span className="evaluation-chart__middle" aria-hidden="true" />
       {evaluations.map((evaluation, ply) => {
-        const whitePercent = evaluation ? evaluationToWhiteWinPercent(evaluation) : 50;
+        const whitePercent = evaluation ? evaluationToWhiteBarPercent(evaluation) : 50;
         const bottom = Math.min(50, whitePercent);
         const height = Math.max(1.5, Math.abs(whitePercent - 50));
         return (
@@ -353,6 +352,79 @@ type AnalysisStatus =
   | { kind: 'position'; ply: number }
   | { kind: 'full'; current: number; total: number }
   | { kind: 'error'; message: string };
+
+function AutomaticPositionAnalysis({
+  analysisAbortRef,
+  fen,
+  gameId,
+  isVariation,
+  ply,
+  setAnalysisStatus,
+  setEngineAnalysisByPly,
+  setVariationAnalysisByFen,
+}: {
+  analysisAbortRef: MutableRefObject<AbortController | null>;
+  fen: string;
+  gameId: string;
+  isVariation: boolean;
+  ply: number;
+  setAnalysisStatus: Dispatch<SetStateAction<AnalysisStatus>>;
+  setEngineAnalysisByPly: Dispatch<SetStateAction<Record<number, StockfishAnalysis>>>;
+  setVariationAnalysisByFen: Dispatch<SetStateAction<Record<string, StockfishAnalysis>>>;
+}) {
+  useEffect(() => {
+    const controller = new AbortController();
+    const cacheGameId = isVariation ? `${gameId}:variation` : gameId;
+    const cachePly = isVariation ? 0 : ply;
+    analysisAbortRef.current?.abort();
+    analysisAbortRef.current = controller;
+    setAnalysisStatus({ kind: 'position', ply });
+
+    void (async () => {
+      try {
+        const cached = await getCachedAnalysis(
+          cacheGameId,
+          cachePly,
+          fen,
+          STOCKFISH_DEPTH,
+        );
+        const analysis = cached
+          ?? await analyzePosition(fen, { depth: STOCKFISH_DEPTH, signal: controller.signal });
+        if (controller.signal.aborted) return;
+        if (!cached) await cacheAnalysis(cacheGameId, cachePly, analysis);
+        if (controller.signal.aborted) return;
+
+        if (isVariation) {
+          setVariationAnalysisByFen((current) => ({ ...current, [fen]: analysis }));
+        } else {
+          setEngineAnalysisByPly((current) => ({ ...current, [ply]: analysis }));
+        }
+        setAnalysisStatus({ kind: 'idle' });
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        setAnalysisStatus({
+          kind: 'error',
+          message: error instanceof Error ? error.message : 'Не удалось выполнить анализ.',
+        });
+      } finally {
+        if (analysisAbortRef.current === controller) analysisAbortRef.current = null;
+      }
+    })();
+
+    return () => controller.abort();
+  }, [
+    analysisAbortRef,
+    fen,
+    gameId,
+    isVariation,
+    ply,
+    setAnalysisStatus,
+    setEngineAnalysisByPly,
+    setVariationAnalysisByFen,
+  ]);
+
+  return null;
+}
 
 function formatClock(seconds: number | null) {
   if (seconds === null) return null;
@@ -430,6 +502,7 @@ export function GameViewer({
   const [variationAnalysisByFen, setVariationAnalysisByFen] = useState<Record<string, StockfishAnalysis>>({});
   const [variation, setVariation] = useState<Variation | null>(null);
   const [variationStep, setVariationStep] = useState<number | null>(null);
+  const [savedAnalysisGameId, setSavedAnalysisGameId] = useState<string | null>(null);
   const [analysisStatus, setAnalysisStatus] = useState<AnalysisStatus>({ kind: 'idle' });
   const activeMoveRef = useRef<HTMLButtonElement>(null);
   const analysisAbortRef = useRef<AbortController>(null);
@@ -476,11 +549,16 @@ export function GameViewer({
 
     const expectedFens = [game.initialFen, ...game.moves.map((move) => move.fen)];
 
-    void loadSavedGameAnalysis(gameId, expectedFens).then((saved) => {
-      if (!cancelled && saved) {
-        setEngineAnalysisByPly((current) => ({ ...saved, ...current }));
-      }
-    });
+    void loadSavedGameAnalysis(gameId, expectedFens)
+      .then((saved) => {
+        if (!cancelled && saved) {
+          setEngineAnalysisByPly((current) => ({ ...saved, ...current }));
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setSavedAnalysisGameId(gameId);
+      });
 
     return () => {
       cancelled = true;
@@ -714,6 +792,21 @@ export function GameViewer({
 
   return (
     <section className="game-viewer" aria-labelledby="game-title">
+      {savedAnalysisGameId === gameId
+        && !currentEngineAnalysis
+        && analysisStatus.kind !== 'full' && (
+          <AutomaticPositionAnalysis
+            analysisAbortRef={analysisAbortRef}
+            fen={fen}
+            gameId={loadedGame.id}
+            isVariation={isVariation}
+            key={`${isVariation ? 'variation' : 'mainline'}:${fen}`}
+            ply={isVariation ? activeVariationStep : currentPly}
+            setAnalysisStatus={setAnalysisStatus}
+            setEngineAnalysisByPly={setEngineAnalysisByPly}
+            setVariationAnalysisByFen={setVariationAnalysisByFen}
+          />
+        )}
       <div className="board-column">
         <PlayerBar
           clockSeconds={topClock}
@@ -822,9 +915,11 @@ export function GameViewer({
                 </button>
               ) : (
                 <>
-                  <button className="engine-button" onClick={analyzeCurrentPosition} type="button">
-                    Анализ позиции
-                  </button>
+                  {!currentEngineAnalysis && (
+                    <button className="engine-button" onClick={analyzeCurrentPosition} type="button">
+                      {analysisStatus.kind === 'error' ? 'Повторить анализ' : 'Анализ позиции'}
+                    </button>
+                  )}
                   {!isVariation && (
                     <button className="engine-button engine-button--secondary" onClick={analyzeWholeGame} type="button">
                       Вся партия
@@ -929,7 +1024,7 @@ export function GameViewer({
                       <span
                         aria-label={judgementLabels[move.judgement].label}
                         className={`move-judgement move-judgement--${move.judgement}`}
-                        title={`${judgementLabels[move.judgement].label}${move.winPercentLoss === null ? '' : `: потеря ${move.winPercentLoss.toFixed(0)}% шансов на победу`}`}
+                        title={`${judgementLabels[move.judgement].label}${move.evaluationLoss === null ? '' : `: потеря ${(move.evaluationLoss / 100).toFixed(2)} пешки по оценке Stockfish`}`}
                       >
                         {judgementLabels[move.judgement].glyph}
                       </span>

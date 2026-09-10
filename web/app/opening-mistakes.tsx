@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import {
+  formatCentipawnEvaluation,
   loadStatisticsIndex,
   summarizeLostOpenings,
   type AnalysisFilters,
@@ -143,9 +144,10 @@ export function OpeningMistakes({
           <span className="opening-mistakes-kicker">Где партия уходила из-под контроля</span>
           <h2 id="opening-mistakes-title">Проигранные дебюты</h2>
           <p>
-            Первый ход в первые {fullMoves} ходов, потерявший от{' '}
-            {index.opening.minimumWinPercentLoss} п.п. и оставивший не больше{' '}
-            {index.opening.badPositionMaxWinPercent}% шансов. После него позиция уже не
+            Первый ход в первые {fullMoves} ходов, ухудшивший оценку минимум на{' '}
+            {(index.opening.minimumEvaluationLoss / 100).toFixed(2)} пешки и оставивший
+            оценку за вас не выше {formatCentipawnEvaluation(index.opening.badPositionMaxEvaluation)}.
+            После него позиция уже не
             восстанавливалась без явного зевка соперника.
           </p>
         </div>
@@ -190,7 +192,7 @@ export function OpeningMistakes({
                       <span>После этого хода положение не исправлялось без зевка соперника</span>
                     </div>
                     <span className="opening-mistake-loss">
-                      {position.averageAfterWinPercent.toFixed(1)}% шансов
+                      {formatCentipawnEvaluation(position.averageAfterEvaluation)} за вас
                     </span>
                   </header>
 
