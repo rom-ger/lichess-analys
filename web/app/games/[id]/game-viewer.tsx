@@ -9,6 +9,7 @@ import {
   useState,
   type Dispatch,
   type MutableRefObject,
+  type PointerEvent as ReactPointerEvent,
   type SetStateAction,
 } from 'react';
 import {
@@ -56,6 +57,17 @@ type Variation = {
 };
 
 type BoardMove = Pick<GameMove, 'from' | 'san' | 'to'>;
+
+type PieceDrag = {
+  from: string;
+  isDragging: boolean;
+  piece: string;
+  pointerId: number;
+  startX: number;
+  startY: number;
+  x: number;
+  y: number;
+};
 
 const dateFormatter = new Intl.DateTimeFormat('ru-RU', {
   day: 'numeric',
@@ -161,7 +173,11 @@ function ChessBoard({
 }) {
   const position = useMemo(() => boardFromFen(fen), [fen]);
   const chess = useMemo(() => new Chess(fen), [fen]);
+  const boardRef = useRef<HTMLDivElement>(null);
+  const ignoreClickRef = useRef(false);
+  const pieceDragRef = useRef<PieceDrag | null>(null);
   const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
+  const [pieceDrag, setPieceDrag] = useState<PieceDrag | null>(null);
   const [promotion, setPromotion] = useState<{
     from: string;
     options: Promotion[];
@@ -172,37 +188,157 @@ function ChessBoard({
   const bestMoveMatch = bestMove?.match(/^([a-h][1-8])([a-h][1-8])/);
   const bestFrom = bestMoveMatch?.[1];
   const bestTo = bestMoveMatch?.[2];
+  const bestArrow = (() => {
+    if (!bestFrom || !bestTo) return null;
+    const rawFromX = (shownFiles.indexOf(bestFrom[0]) + 0.5) * 12.5;
+    const rawFromY = (shownRanks.indexOf(bestFrom[1]) + 0.5) * 12.5;
+    const rawToX = (shownFiles.indexOf(bestTo[0]) + 0.5) * 12.5;
+    const rawToY = (shownRanks.indexOf(bestTo[1]) + 0.5) * 12.5;
+    const deltaX = rawToX - rawFromX;
+    const deltaY = rawToY - rawFromY;
+    const distance = Math.hypot(deltaX, deltaY);
+    if (distance === 0) return null;
+    const padding = 2.2;
+    const unitX = deltaX / distance;
+    const unitY = deltaY / distance;
+    const perpendicularX = -unitY;
+    const perpendicularY = unitX;
+    const headLength = 3;
+    const headHalfWidth = 1.5;
+    const strokeCapRadius = 0.575;
+    const headOverlap = 0.3;
+    const tipX = rawToX - unitX * padding;
+    const tipY = rawToY - unitY * padding;
+    const headBaseX = tipX - unitX * headLength;
+    const headBaseY = tipY - unitY * headLength;
+
+    return {
+      fromX: rawFromX + unitX * padding,
+      fromY: rawFromY + unitY * padding,
+      headPoints: [
+        `${tipX},${tipY}`,
+        `${headBaseX + perpendicularX * headHalfWidth},${headBaseY + perpendicularY * headHalfWidth}`,
+        `${headBaseX - perpendicularX * headHalfWidth},${headBaseY - perpendicularY * headHalfWidth}`,
+      ].join(' '),
+      lineToX: headBaseX - unitX * (strokeCapRadius - headOverlap),
+      lineToY: headBaseY - unitY * (strokeCapRadius - headOverlap),
+    };
+  })();
   const legalMoves = useMemo(() => (
     selectedSquare
       ? chess.moves({ square: selectedSquare as Square, verbose: true })
       : []
   ), [chess, selectedSquare]);
 
+  function isMovablePiece(piece: string | undefined) {
+    return Boolean(
+      piece
+      && (piece === piece.toUpperCase() ? 'w' : 'b') === chess.turn(),
+    );
+  }
+
+  function tryMove(from: string, to: string) {
+    const destinationMoves = chess
+      .moves({ square: from as Square, verbose: true })
+      .filter((move) => move.to === to);
+    if (destinationMoves.length === 0) return false;
+
+    const promotions = destinationMoves
+      .map((move) => move.promotion)
+      .filter((piece): piece is Promotion => Boolean(piece));
+    if (promotions.length > 1) {
+      setPromotion({ from, options: promotions, to });
+    } else {
+      onMove(from, to, promotions[0]);
+    }
+    setSelectedSquare(null);
+    return true;
+  }
+
   function selectSquare(square: string) {
-    const destinationMoves = legalMoves.filter((move) => move.to === square);
-    if (selectedSquare && destinationMoves.length > 0) {
-      const promotions = destinationMoves
-        .map((move) => move.promotion)
-        .filter((piece): piece is Promotion => Boolean(piece));
-      if (promotions.length > 1) {
-        setPromotion({ from: selectedSquare, options: promotions, to: square });
-      } else {
-        onMove(selectedSquare, square, promotions[0]);
-      }
-      setSelectedSquare(null);
+    if (selectedSquare && tryMove(selectedSquare, square)) return;
+
+    const piece = position.get(square);
+    setSelectedSquare(isMovablePiece(piece) ? square : null);
+  }
+
+  function pointerPosition(event: ReactPointerEvent) {
+    const bounds = boardRef.current?.getBoundingClientRect();
+    return {
+      x: event.clientX - (bounds?.left ?? 0),
+      y: event.clientY - (bounds?.top ?? 0),
+    };
+  }
+
+  function startPieceDrag(
+    event: ReactPointerEvent<HTMLButtonElement>,
+    square: string,
+    piece: string | undefined,
+  ) {
+    if (!piece || !isMovablePiece(piece) || (event.pointerType === 'mouse' && event.button !== 0)) {
       return;
     }
 
-    const piece = position.get(square);
-    const isMovable = piece
-      && (piece === piece.toUpperCase() ? 'w' : 'b') === chess.turn();
-    setSelectedSquare(isMovable ? square : null);
+    const point = pointerPosition(event);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setSelectedSquare(square);
+    const nextDrag = {
+      from: square,
+      isDragging: false,
+      piece,
+      pointerId: event.pointerId,
+      startX: point.x,
+      startY: point.y,
+      ...point,
+    };
+    pieceDragRef.current = nextDrag;
+    setPieceDrag(nextDrag);
+  }
+
+  function movePieceDrag(event: ReactPointerEvent<HTMLButtonElement>) {
+    const currentDrag = pieceDragRef.current;
+    if (!currentDrag || currentDrag.pointerId !== event.pointerId) return;
+    const point = pointerPosition(event);
+    const isDragging = currentDrag.isDragging
+      || Math.hypot(point.x - currentDrag.startX, point.y - currentDrag.startY) >= 5;
+    if (isDragging) event.preventDefault();
+    const nextDrag = { ...currentDrag, ...point, isDragging };
+    pieceDragRef.current = nextDrag;
+    setPieceDrag(nextDrag);
+  }
+
+  function finishPieceDrag(event: ReactPointerEvent<HTMLButtonElement>) {
+    const currentDrag = pieceDragRef.current;
+    if (!currentDrag || currentDrag.pointerId !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    pieceDragRef.current = null;
+    setPieceDrag(null);
+    if (!currentDrag.isDragging) return;
+
+    event.preventDefault();
+    ignoreClickRef.current = true;
+    const destination = document
+      .elementFromPoint(event.clientX, event.clientY)
+      ?.closest<HTMLElement>('[data-square]')
+      ?.dataset.square;
+    if (destination) tryMove(currentDrag.from, destination);
+  }
+
+  function cancelPieceDrag(event: ReactPointerEvent<HTMLButtonElement>) {
+    const currentDrag = pieceDragRef.current;
+    if (!currentDrag || currentDrag.pointerId !== event.pointerId) return;
+    pieceDragRef.current = null;
+    ignoreClickRef.current = false;
+    setPieceDrag(null);
   }
 
   return (
     <div
       aria-label={`Интерактивная шахматная доска, ход ${lastMove?.san ?? 'начальная позиция'}`}
-      className="chess-board"
+      className={`chess-board${pieceDrag?.isDragging ? ' chess-board--dragging' : ''}`}
+      ref={boardRef}
       role="grid"
     >
       {shownRanks.flatMap((rank, rankIndex) => shownFiles.map((file, fileIndex) => {
@@ -210,8 +346,6 @@ function ChessBoard({
         const piece = position.get(square);
         const isDark = (files.indexOf(file) + Number(rank)) % 2 === 1;
         const isLastMove = square === lastMove?.from || square === lastMove?.to;
-        const isBestFrom = square === bestFrom;
-        const isBestTo = square === bestTo;
         const legalMove = legalMoves.find((move) => move.to === square);
         const isSelected = square === selectedSquare;
 
@@ -219,9 +353,20 @@ function ChessBoard({
           <button
             aria-label={`${square}${piece ? `, ${piece === piece.toUpperCase() ? 'белая' : 'чёрная'} фигура` : ''}${legalMove ? ', доступный ход' : ''}`}
             aria-selected={isSelected}
-            className={`board-square board-square--${isDark ? 'dark' : 'light'}${isLastMove ? ' board-square--last' : ''}${isBestFrom ? ' board-square--best-from' : ''}${isBestTo ? ' board-square--best-to' : ''}${legalMove ? ' board-square--legal' : ''}${legalMove && piece ? ' board-square--capture' : ''}${isSelected ? ' board-square--selected' : ''}`}
+            className={`board-square board-square--${isDark ? 'dark' : 'light'}${isLastMove ? ' board-square--last' : ''}${legalMove ? ' board-square--legal' : ''}${legalMove && piece ? ' board-square--capture' : ''}${isSelected ? ' board-square--selected' : ''}`}
+            data-square={square}
             key={square}
-            onClick={() => selectSquare(square)}
+            onClick={() => {
+              if (ignoreClickRef.current) {
+                ignoreClickRef.current = false;
+                return;
+              }
+              selectSquare(square);
+            }}
+            onPointerCancel={cancelPieceDrag}
+            onPointerDown={(event) => startPieceDrag(event, square, piece)}
+            onPointerMove={movePieceDrag}
+            onPointerUp={finishPieceDrag}
             role="gridcell"
             type="button"
           >
@@ -236,7 +381,7 @@ function ChessBoard({
             {piece && (
               <span
                 aria-label={`${piece === piece.toUpperCase() ? 'Белая' : 'Чёрная'} фигура на ${square}`}
-                className={`chess-piece chess-piece--${piece === piece.toUpperCase() ? 'white' : 'black'}`}
+                className={`chess-piece chess-piece--${piece === piece.toUpperCase() ? 'white' : 'black'}${pieceDrag?.isDragging && pieceDrag.from === square ? ' chess-piece--drag-source' : ''}`}
               >
                 {pieces[piece]}
               </span>
@@ -244,6 +389,31 @@ function ChessBoard({
           </button>
         );
       }))}
+      {bestArrow && (
+        <svg
+          aria-hidden="true"
+          className="best-move-arrow"
+          preserveAspectRatio="none"
+          viewBox="0 0 100 100"
+        >
+          <line
+            x1={bestArrow.fromX}
+            x2={bestArrow.lineToX}
+            y1={bestArrow.fromY}
+            y2={bestArrow.lineToY}
+          />
+          <polygon points={bestArrow.headPoints} />
+        </svg>
+      )}
+      {pieceDrag?.isDragging && (
+        <span
+          aria-hidden="true"
+          className={`dragged-piece dragged-piece--${pieceDrag.piece === pieceDrag.piece.toUpperCase() ? 'white' : 'black'}`}
+          style={{ left: pieceDrag.x, top: pieceDrag.y }}
+        >
+          {pieces[pieceDrag.piece]}
+        </span>
+      )}
       {promotion && (
         <div className="promotion-picker" role="dialog" aria-label="Выберите фигуру для превращения">
           {promotion.options.map((piece) => (
@@ -828,7 +998,7 @@ export function GameViewer({
         <p className="board-interaction-hint">
           {isVariation
             ? `Вариант · позиция ${activeVariationStep} из ${variation?.moves.length ?? 0}. Можно продолжить своим ходом.`
-            : 'Нажмите на фигуру, затем на доступную клетку, чтобы создать вариант.'}
+            : 'Перетащите фигуру или нажмите на неё и доступную клетку, чтобы создать вариант.'}
         </p>
         <PlayerBar
           clockSeconds={bottomClock}
