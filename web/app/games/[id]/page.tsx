@@ -5,10 +5,16 @@ const username = process.env.LICHESS_USERNAME?.trim();
 
 export default async function GamePage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<{ ply?: string | string[] }>;
 }) {
   const { id } = await params;
+  const query = await searchParams;
+  const rawPly = Array.isArray(query.ply) ? query.ply[0] : query.ply;
+  const parsedPly = Number(rawPly);
+  const initialPly = Number.isInteger(parsedPly) && parsedPly >= 0 ? parsedPly : 0;
 
   return (
     <main className="game-page-shell">
@@ -28,7 +34,12 @@ export default async function GamePage({
           </p>
         </div>
       ) : (
-        <GameViewer key={id} gameId={decodeURIComponent(id)} username={username} />
+        <GameViewer
+          gameId={decodeURIComponent(id)}
+          initialPly={initialPly}
+          key={`${id}:${initialPly}`}
+          username={username}
+        />
       )}
     </main>
   );

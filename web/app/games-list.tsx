@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import {
   getRecentGames,
@@ -8,12 +8,30 @@ import {
   type GameRow,
   type GameSpeed,
 } from '../lib/lichess';
-import type { QualityFilters } from '../lib/statistics';
-import { QualityDashboard } from './quality-dashboard';
+import type { AnalysisFilters } from '../lib/statistics';
+import { EndgameErrors } from './endgame-errors';
+import { OpeningMistakes } from './opening-mistakes';
 
 type Period = '30d' | '90d' | 'year' | 'all' | 'custom';
+type HomeView = 'games' | 'openings' | 'endgames';
+
+type SavedFilters = {
+  period: Period;
+  customFrom: string;
+  customTo: string;
+  speed: GameSpeed | '';
+  result: GameResult | '';
+  view: HomeView;
+};
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
+const FILTERS_STORAGE_KEY = 'lichess-analysis:main-filters:v1';
+
+const views: Array<{ value: HomeView; label: string }> = [
+  { value: 'games', label: 'Все партии' },
+  { value: 'openings', label: 'Проигранные дебюты' },
+  { value: 'endgames', label: 'Ошибки в эндшпиле' },
+];
 
 const periodFilters: Array<{ value: Period; label: string }> = [
   { value: '30d', label: '30 дней' },
@@ -109,12 +127,51 @@ export function GamesList({ username }: { username: string }) {
   const [customTo, setCustomTo] = useState('');
   const [speed, setSpeed] = useState<GameSpeed | ''>('');
   const [result, setResult] = useState<GameResult | ''>('');
+  const [view, setView] = useState<HomeView>('games');
   const [page, setPage] = useState(1);
+  const [filtersLoaded, setFiltersLoaded] = useState(false);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      try {
+        const rawValue = window.localStorage.getItem(FILTERS_STORAGE_KEY);
+        if (rawValue) {
+          const saved = JSON.parse(rawValue) as Partial<SavedFilters>;
+          if (periodFilters.some(({ value }) => value === saved.period)) setPeriod(saved.period as Period);
+          if (typeof saved.customFrom === 'string') setCustomFrom(saved.customFrom);
+          if (typeof saved.customTo === 'string') setCustomTo(saved.customTo);
+          if (speedFilters.some(({ value }) => value === saved.speed)) setSpeed(saved.speed as GameSpeed | '');
+          if (resultFilters.some(({ value }) => value === saved.result)) setResult(saved.result as GameResult | '');
+          if (views.some(({ value }) => value === saved.view)) setView(saved.view as HomeView);
+        }
+      } catch {
+        // Повреждённые или недоступные данные localStorage не мешают работе фильтров.
+      }
+      setFiltersLoaded(true);
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, []);
+
+  useEffect(() => {
+    if (!filtersLoaded) return;
+    try {
+      window.localStorage.setItem(FILTERS_STORAGE_KEY, JSON.stringify({
+        period,
+        customFrom,
+        customTo,
+        speed,
+        result,
+        view,
+      } satisfies SavedFilters));
+    } catch {
+      // В приватном режиме сохранение может быть недоступно.
+    }
+  }, [customFrom, customTo, filtersLoaded, period, result, speed, view]);
   const range = useMemo(
     () => rangeFor(period, customFrom, customTo),
     [customFrom, customTo, period],
   );
-  const qualityFilters = useMemo<QualityFilters>(() => ({
+  const analysisFilters = useMemo<AnalysisFilters>(() => ({
     ...range,
     speed: speed || undefined,
     result: result || undefined,
@@ -226,9 +283,26 @@ export function GamesList({ username }: { username: string }) {
         </fieldset>
       </div>
 
-      <QualityDashboard filters={qualityFilters} username={username} />
+      <nav className="view-switcher" aria-label="Раздел главной страницы">
+        {views.map((item) => (
+          <button
+            aria-pressed={view === item.value}
+            key={item.value}
+            onClick={() => {
+              setView(item.value);
+              setPage(1);
+            }}
+            type="button"
+          >
+            {item.label}
+          </button>
+        ))}
+      </nav>
 
-      {games.length === 0 ? (
+      {view === 'openings' && <OpeningMistakes filters={analysisFilters} username={username} />}
+      {view === 'endgames' && <EndgameErrors filters={analysisFilters} username={username} />}
+
+      {view === 'games' && (games.length === 0 ? (
         <div className="state-message">
           <p className="state-title">Подходящих партий нет</p>
           <p>Попробуйте изменить выбранные фильтры.</p>
@@ -247,6 +321,8 @@ export function GamesList({ username }: { username: string }) {
               className="game-row"
               href={`/games/${encodeURIComponent(game.id)}`}
               key={game.id}
+              rel="noopener noreferrer"
+              target="_blank"
             >
               <div className="date-cell">
                 <time dateTime={new Date(game.playedAt).toISOString()}>
@@ -271,9 +347,9 @@ export function GamesList({ username }: { username: string }) {
             </Link>
           ))}
         </div>
-      )}
+      ))}
 
-      {(page > 1 || hasNext) && (
+      {view === 'games' && (page > 1 || hasNext) && (
         <nav className="pagination" aria-label="Страницы партий">
           <button
             className="page-button"

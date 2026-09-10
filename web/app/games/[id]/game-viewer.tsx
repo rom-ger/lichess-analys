@@ -1,5 +1,6 @@
 'use client';
 
+import { Chess, type Square } from 'chess.js';
 import Link from 'next/link';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -27,6 +28,25 @@ const pieces: Record<string, string> = {
   K: '♚', Q: '♛', R: '♜', B: '♝', N: '♞', P: '♟',
   k: '♚', q: '♛', r: '♜', b: '♝', n: '♞', p: '♟',
 };
+
+type Promotion = 'q' | 'r' | 'b' | 'n';
+
+type VariationMove = {
+  color: 'w' | 'b';
+  fen: string;
+  from: string;
+  moveNumber: number;
+  promotion?: Promotion;
+  san: string;
+  to: string;
+};
+
+type Variation = {
+  basePly: number;
+  moves: VariationMove[];
+};
+
+type BoardMove = Pick<GameMove, 'from' | 'san' | 'to'>;
 
 const dateFormatter = new Intl.DateTimeFormat('ru-RU', {
   day: 'numeric',
@@ -57,29 +77,124 @@ function boardFromFen(fen: string) {
   return position;
 }
 
+function materialBalanceFromFen(fen: string) {
+  const values: Record<string, number> = { p: 1, n: 3, b: 3, r: 5, q: 9 };
+  return [...fen.split(' ')[0]].reduce((balance, piece) => {
+    const value = values[piece.toLowerCase()] ?? 0;
+    return piece === piece.toUpperCase() ? balance + value : balance - value;
+  }, 0);
+}
+
+function moveNumberFromFen(fen: string) {
+  const value = Number(fen.split(' ')[5]);
+  return Number.isFinite(value) && value > 0 ? value : 1;
+}
+
+function playMove(
+  fen: string,
+  from: string,
+  to: string,
+  promotion?: Promotion,
+): VariationMove | null {
+  const chess = new Chess(fen);
+  const moveNumber = moveNumberFromFen(fen);
+
+  try {
+    const move = chess.move({
+      from: from as Square,
+      to: to as Square,
+      ...(promotion ? { promotion } : {}),
+    });
+    if (!move) return null;
+
+    return {
+      color: move.color,
+      fen: chess.fen(),
+      from: move.from,
+      moveNumber,
+      ...(move.promotion ? { promotion: move.promotion as Promotion } : {}),
+      san: move.san,
+      to: move.to,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function playUciVariation(fen: string, uciMoves: string[]) {
+  const moves: VariationMove[] = [];
+  let currentFen = fen;
+
+  for (const uci of uciMoves) {
+    const match = uci.match(/^([a-h][1-8])([a-h][1-8])([qrbn])?$/);
+    if (!match) break;
+    const move = playMove(currentFen, match[1], match[2], match[3] as Promotion | undefined);
+    if (!move) break;
+    moves.push(move);
+    currentFen = move.fen;
+  }
+
+  return moves;
+}
+
 function ChessBoard({
   bestMove,
   fen,
   orientation,
   lastMove,
+  onMove,
 }: {
   bestMove?: string | null;
   fen: string;
   orientation: GameDetails['playerColor'];
-  lastMove?: GameMove;
+  lastMove?: BoardMove;
+  onMove: (from: string, to: string, promotion?: Promotion) => void;
 }) {
   const position = useMemo(() => boardFromFen(fen), [fen]);
+  const chess = useMemo(() => new Chess(fen), [fen]);
+  const [selectedSquare, setSelectedSquare] = useState<string | null>(null);
+  const [promotion, setPromotion] = useState<{
+    from: string;
+    options: Promotion[];
+    to: string;
+  } | null>(null);
   const shownFiles = orientation === 'white' ? files : [...files].reverse();
   const shownRanks = orientation === 'white' ? ranks : [...ranks].reverse();
   const bestMoveMatch = bestMove?.match(/^([a-h][1-8])([a-h][1-8])/);
   const bestFrom = bestMoveMatch?.[1];
   const bestTo = bestMoveMatch?.[2];
+  const legalMoves = useMemo(() => (
+    selectedSquare
+      ? chess.moves({ square: selectedSquare as Square, verbose: true })
+      : []
+  ), [chess, selectedSquare]);
+
+  function selectSquare(square: string) {
+    const destinationMoves = legalMoves.filter((move) => move.to === square);
+    if (selectedSquare && destinationMoves.length > 0) {
+      const promotions = destinationMoves
+        .map((move) => move.promotion)
+        .filter((piece): piece is Promotion => Boolean(piece));
+      if (promotions.length > 1) {
+        setPromotion({ from: selectedSquare, options: promotions, to: square });
+      } else {
+        onMove(selectedSquare, square, promotions[0]);
+      }
+      setSelectedSquare(null);
+      return;
+    }
+
+    const piece = position.get(square);
+    const isMovable = piece
+      && (piece === piece.toUpperCase() ? 'w' : 'b') === chess.turn();
+    setSelectedSquare(isMovable ? square : null);
+  }
 
   return (
     <div
-      aria-label={`Шахматная доска, ход ${lastMove?.san ?? 'начальная позиция'}`}
+      aria-label={`Интерактивная шахматная доска, ход ${lastMove?.san ?? 'начальная позиция'}`}
       className="chess-board"
-      role="img"
+      role="grid"
     >
       {shownRanks.flatMap((rank, rankIndex) => shownFiles.map((file, fileIndex) => {
         const square = `${file}${rank}`;
@@ -88,14 +203,27 @@ function ChessBoard({
         const isLastMove = square === lastMove?.from || square === lastMove?.to;
         const isBestFrom = square === bestFrom;
         const isBestTo = square === bestTo;
+        const legalMove = legalMoves.find((move) => move.to === square);
+        const isSelected = square === selectedSquare;
 
         return (
-          <div
-            className={`board-square board-square--${isDark ? 'dark' : 'light'}${isLastMove ? ' board-square--last' : ''}${isBestFrom ? ' board-square--best-from' : ''}${isBestTo ? ' board-square--best-to' : ''}`}
+          <button
+            aria-label={`${square}${piece ? `, ${piece === piece.toUpperCase() ? 'белая' : 'чёрная'} фигура` : ''}${legalMove ? ', доступный ход' : ''}`}
+            aria-selected={isSelected}
+            className={`board-square board-square--${isDark ? 'dark' : 'light'}${isLastMove ? ' board-square--last' : ''}${isBestFrom ? ' board-square--best-from' : ''}${isBestTo ? ' board-square--best-to' : ''}${legalMove ? ' board-square--legal' : ''}${legalMove && piece ? ' board-square--capture' : ''}${isSelected ? ' board-square--selected' : ''}`}
             key={square}
+            onClick={() => selectSquare(square)}
+            role="gridcell"
+            type="button"
           >
             {fileIndex === 0 && <span className="rank-label">{rank}</span>}
             {rankIndex === 7 && <span className="file-label">{file}</span>}
+            {legalMove && (
+              <span
+                aria-hidden="true"
+                className={`board-legal-marker${piece ? ' board-legal-marker--capture' : ''}`}
+              />
+            )}
             {piece && (
               <span
                 aria-label={`${piece === piece.toUpperCase() ? 'Белая' : 'Чёрная'} фигура на ${square}`}
@@ -104,9 +232,28 @@ function ChessBoard({
                 {pieces[piece]}
               </span>
             )}
-          </div>
+          </button>
         );
       }))}
+      {promotion && (
+        <div className="promotion-picker" role="dialog" aria-label="Выберите фигуру для превращения">
+          {promotion.options.map((piece) => (
+            <button
+              key={piece}
+              onClick={() => {
+                onMove(promotion.from, promotion.to, piece);
+                setPromotion(null);
+              }}
+              type="button"
+            >
+              {pieces[chess.turn() === 'w' ? piece.toUpperCase() : piece]}
+            </button>
+          ))}
+          <button className="promotion-picker__cancel" onClick={() => setPromotion(null)} type="button">
+            Отмена
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -266,10 +413,23 @@ function scoresFor(game: GameDetails) {
   return whiteWon ? { white: '1', black: '0' } : { white: '0', black: '1' };
 }
 
-export function GameViewer({ gameId, username }: { gameId: string; username: string }) {
+export function GameViewer({
+  gameId,
+  initialPly = 0,
+  username,
+}: {
+  gameId: string;
+  initialPly?: number;
+  username: string;
+}) {
   const game = useMemo(() => getGameById(username, gameId), [gameId, username]);
-  const [currentPly, setCurrentPly] = useState(0);
+  const [currentPly, setCurrentPly] = useState(() => (
+    game ? Math.min(initialPly, game.moves.length) : 0
+  ));
   const [engineAnalysisByPly, setEngineAnalysisByPly] = useState<Record<number, StockfishAnalysis>>({});
+  const [variationAnalysisByFen, setVariationAnalysisByFen] = useState<Record<string, StockfishAnalysis>>({});
+  const [variation, setVariation] = useState<Variation | null>(null);
+  const [variationStep, setVariationStep] = useState<number | null>(null);
   const [analysisStatus, setAnalysisStatus] = useState<AnalysisStatus>({ kind: 'idle' });
   const activeMoveRef = useRef<HTMLButtonElement>(null);
   const analysisAbortRef = useRef<AbortController>(null);
@@ -277,28 +437,36 @@ export function GameViewer({ gameId, username }: { gameId: string; username: str
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       if (!game) return;
+      const isVariation = variation && variationStep !== null;
       if (event.key === 'ArrowLeft') {
         event.preventDefault();
-        setCurrentPly((ply) => Math.max(0, ply - 1));
+        if (isVariation) setVariationStep((step) => Math.max(0, (step ?? 0) - 1));
+        else setCurrentPly((ply) => Math.max(0, ply - 1));
       } else if (event.key === 'ArrowRight') {
         event.preventDefault();
-        setCurrentPly((ply) => Math.min(game.moves.length, ply + 1));
+        if (isVariation) {
+          setVariationStep((step) => Math.min(variation.moves.length, (step ?? 0) + 1));
+        } else {
+          setCurrentPly((ply) => Math.min(game.moves.length, ply + 1));
+        }
       } else if (event.key === 'Home') {
         event.preventDefault();
-        setCurrentPly(0);
+        if (isVariation) setVariationStep(0);
+        else setCurrentPly(0);
       } else if (event.key === 'End') {
         event.preventDefault();
-        setCurrentPly(game.moves.length);
+        if (isVariation) setVariationStep(variation.moves.length);
+        else setCurrentPly(game.moves.length);
       }
     }
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [game]);
+  }, [game, variation, variationStep]);
 
   useEffect(() => {
     activeMoveRef.current?.scrollIntoView({ block: 'nearest' });
-  }, [currentPly]);
+  }, [currentPly, variationStep]);
 
   useEffect(() => () => analysisAbortRef.current?.abort(), []);
 
@@ -331,8 +499,20 @@ export function GameViewer({ gameId, username }: { gameId: string; username: str
 
   const loadedGame = game;
 
-  const currentMove = currentPly > 0 ? game.moves[currentPly - 1] : undefined;
-  const fen = currentMove?.fen ?? game.initialFen;
+  const mainlineMove = currentPly > 0 ? game.moves[currentPly - 1] : undefined;
+  const mainlineFen = mainlineMove?.fen ?? game.initialFen;
+  const isVariation = Boolean(variation && variationStep !== null);
+  const activeVariationStep = variation
+    ? Math.min(variationStep ?? 0, variation.moves.length)
+    : 0;
+  const variationBaseFen = variation
+    ? (variation.basePly === 0 ? game.initialFen : game.moves[variation.basePly - 1].fen)
+    : game.initialFen;
+  const variationMove = variation && activeVariationStep > 0
+    ? variation.moves[activeVariationStep - 1]
+    : undefined;
+  const fen = isVariation ? (variationMove?.fen ?? variationBaseFen) : mainlineFen;
+  const currentMove: BoardMove | undefined = isVariation ? variationMove : mainlineMove;
   const evaluations = [
     game.initialEvaluation,
     ...game.moves.map((move) => move.evaluation),
@@ -351,12 +531,24 @@ export function GameViewer({ gameId, username }: { gameId: string; username: str
   ));
   const counts = judgementCounts(playerMoves);
   const playerErrors = playerMoves.filter((move) => move.judgement);
-  const currentEvaluation = evaluations[currentPly] ?? null;
-  const currentEngineAnalysis = engineAnalysisByPly[currentPly];
+  const currentEngineAnalysis = isVariation
+    ? (variationAnalysisByFen[fen]
+      ?? (activeVariationStep === 0 && variation ? engineAnalysisByPly[variation.basePly] : undefined))
+    : engineAnalysisByPly[currentPly];
+  const currentEvaluation = currentEngineAnalysis?.evaluation
+    ?? (isVariation && variation && activeVariationStep === 0
+      ? evaluations[variation.basePly]
+      : isVariation ? null : evaluations[currentPly])
+    ?? null;
   const analysisIsRunning = analysisStatus.kind === 'position' || analysisStatus.kind === 'full';
-  const whiteClockSeconds = currentMove?.whiteClockSeconds ?? game.initialClockSeconds;
-  const blackClockSeconds = currentMove?.blackClockSeconds ?? game.initialClockSeconds;
-  const materialBalance = currentMove?.materialBalance ?? game.initialMaterialBalance;
+  const clockSourceMove = isVariation && variation
+    ? (variation.basePly > 0 ? game.moves[variation.basePly - 1] : undefined)
+    : mainlineMove;
+  const whiteClockSeconds = clockSourceMove?.whiteClockSeconds ?? game.initialClockSeconds;
+  const blackClockSeconds = clockSourceMove?.blackClockSeconds ?? game.initialClockSeconds;
+  const materialBalance = isVariation
+    ? materialBalanceFromFen(fen)
+    : mainlineMove?.materialBalance ?? game.initialMaterialBalance;
   const score = scoresFor(game);
   const bottomPlayer = game.playerColor === 'white' ? game.white : game.black;
   const topPlayer = game.playerColor === 'white' ? game.black : game.white;
@@ -377,12 +569,65 @@ export function GameViewer({ gameId, username }: { gameId: string; username: str
     white: annotatedMoves[index * 2],
     black: annotatedMoves[index * 2 + 1],
   }));
+  const navigationPosition = isVariation ? activeVariationStep : currentPly;
+  const navigationLength = isVariation && variation ? variation.moves.length : game.moves.length;
+
+  function selectMainlinePly(ply: number) {
+    setCurrentPly(ply);
+    setVariationStep(null);
+  }
+
+  function openVariationStep(step: number) {
+    if (!variation) return;
+    setCurrentPly(variation.basePly);
+    setVariationStep(Math.max(0, Math.min(step, variation.moves.length)));
+  }
+
+  function appendVariationMoves(moves: VariationMove[]) {
+    if (moves.length === 0) return;
+    stopAnalysis();
+
+    if (isVariation && variation) {
+      const updatedMoves = [...variation.moves.slice(0, activeVariationStep), ...moves];
+      setVariation({ ...variation, moves: updatedMoves });
+      setVariationStep(updatedMoves.length);
+      return;
+    }
+
+    setVariation({ basePly: currentPly, moves });
+    setVariationStep(moves.length);
+  }
+
+  function makeBoardMove(from: string, to: string, promotion?: Promotion) {
+    const move = playMove(fen, from, to, promotion);
+    if (move) appendVariationMoves([move]);
+  }
+
+  function followEngineVariation(moveIndex: number) {
+    if (!currentEngineAnalysis) return;
+    appendVariationMoves(playUciVariation(fen, currentEngineAnalysis.pv.slice(0, moveIndex + 1)));
+  }
+
+  function navigate(position: 'start' | 'previous' | 'next' | 'end') {
+    if (isVariation && variation) {
+      if (position === 'start') setVariationStep(0);
+      if (position === 'previous') setVariationStep(Math.max(0, activeVariationStep - 1));
+      if (position === 'next') setVariationStep(Math.min(variation.moves.length, activeVariationStep + 1));
+      if (position === 'end') setVariationStep(variation.moves.length);
+      return;
+    }
+
+    if (position === 'start') setCurrentPly(0);
+    if (position === 'previous') setCurrentPly(Math.max(0, currentPly - 1));
+    if (position === 'next') setCurrentPly(Math.min(loadedGame.moves.length, currentPly + 1));
+    if (position === 'end') setCurrentPly(loadedGame.moves.length);
+  }
 
   function moveToError(direction: 'previous' | 'next') {
     const candidates = direction === 'previous'
       ? playerErrors.filter((move) => move.ply < currentPly).reverse()
       : playerErrors.filter((move) => move.ply > currentPly);
-    if (candidates[0]) setCurrentPly(candidates[0].ply);
+    if (candidates[0]) selectMainlinePly(candidates[0].ply);
   }
 
   function stopAnalysis() {
@@ -401,17 +646,33 @@ export function GameViewer({ gameId, username }: { gameId: string; username: str
     return analysis;
   }
 
+  async function analyzeVariationPosition(positionFen: string, signal: AbortSignal) {
+    const cacheGameId = `${loadedGame.id}:variation`;
+    const cached = await getCachedAnalysis(cacheGameId, 0, positionFen, STOCKFISH_DEPTH);
+    if (cached) return cached;
+
+    const analysis = await analyzePosition(positionFen, { depth: STOCKFISH_DEPTH, signal });
+    await cacheAnalysis(cacheGameId, 0, analysis);
+    return analysis;
+  }
+
   async function analyzeCurrentPosition() {
     stopAnalysis();
     const controller = new AbortController();
     analysisAbortRef.current = controller;
-    setAnalysisStatus({ kind: 'position', ply: currentPly });
+    setAnalysisStatus({ kind: 'position', ply: isVariation ? activeVariationStep : currentPly });
 
     try {
-      const analysis = engineAnalysisByPly[currentPly]
-        ?? await analyzePly(currentPly, controller.signal);
+      const analysis = currentEngineAnalysis
+        ?? (isVariation
+          ? await analyzeVariationPosition(fen, controller.signal)
+          : await analyzePly(currentPly, controller.signal));
       if (controller.signal.aborted) return;
-      setEngineAnalysisByPly((current) => ({ ...current, [currentPly]: analysis }));
+      if (isVariation) {
+        setVariationAnalysisByFen((current) => ({ ...current, [fen]: analysis }));
+      } else {
+        setEngineAnalysisByPly((current) => ({ ...current, [currentPly]: analysis }));
+      }
       setAnalysisStatus({ kind: 'idle' });
     } catch (error) {
       if (controller.signal.aborted) return;
@@ -432,7 +693,7 @@ export function GameViewer({ gameId, username }: { gameId: string; username: str
     const collected = { ...engineAnalysisByPly };
 
     try {
-      for (let ply = 0; ply < total; ply += 1) {
+      for (const ply of Array.from({ length: total }, (_, index) => index)) {
         if (controller.signal.aborted) return;
         setAnalysisStatus({ kind: 'full', current: ply + 1, total });
         const analysis = collected[ply] ?? await analyzePly(ply, controller.signal);
@@ -465,10 +726,17 @@ export function GameViewer({ gameId, username }: { gameId: string; username: str
           <ChessBoard
             bestMove={currentEngineAnalysis?.bestMove}
             fen={fen}
+            key={fen}
             lastMove={currentMove}
+            onMove={makeBoardMove}
             orientation={game.playerColor}
           />
         </div>
+        <p className="board-interaction-hint">
+          {isVariation
+            ? `Вариант · позиция ${activeVariationStep} из ${variation?.moves.length ?? 0}. Можно продолжить своим ходом.`
+            : 'Нажмите на фигуру, затем на доступную клетку, чтобы создать вариант.'}
+        </p>
         <PlayerBar
           clockSeconds={bottomClock}
           materialAdvantage={bottomMaterialAdvantage}
@@ -518,9 +786,9 @@ export function GameViewer({ gameId, username }: { gameId: string; username: str
           </div>
 
           <EvaluationGraph
-            currentPly={currentPly}
+            currentPly={isVariation ? -1 : currentPly}
             evaluations={evaluations}
-            onSelect={setCurrentPly}
+            onSelect={selectMainlinePly}
           />
 
           <div className="engine-analysis">
@@ -530,9 +798,18 @@ export function GameViewer({ gameId, username }: { gameId: string; username: str
               </span>
               <strong>{formatEvaluation(currentEvaluation)}</strong>
               {currentEngineAnalysis?.pvSan.length ? (
-                <p title={currentEngineAnalysis.pv.join(' ')}>
-                  {currentEngineAnalysis.pvSan.slice(0, 8).join(' ')}
-                </p>
+                <div className="engine-variation" title={currentEngineAnalysis.pv.join(' ')}>
+                  {currentEngineAnalysis.pvSan.slice(0, 8).map((san, index) => (
+                    <button
+                      aria-label={`Перейти к варианту Stockfish после хода ${san}`}
+                      key={`${currentEngineAnalysis.pv[index]}-${index}`}
+                      onClick={() => followEngineVariation(index)}
+                      type="button"
+                    >
+                      {san}
+                    </button>
+                  ))}
+                </div>
               ) : (
                 <p>{currentEvaluation ? 'Доступна из PGN' : 'Позиция ещё не анализировалась'}</p>
               )}
@@ -548,9 +825,11 @@ export function GameViewer({ gameId, username }: { gameId: string; username: str
                   <button className="engine-button" onClick={analyzeCurrentPosition} type="button">
                     Анализ позиции
                   </button>
-                  <button className="engine-button engine-button--secondary" onClick={analyzeWholeGame} type="button">
-                    Вся партия
-                  </button>
+                  {!isVariation && (
+                    <button className="engine-button engine-button--secondary" onClick={analyzeWholeGame} type="button">
+                      Вся партия
+                    </button>
+                  )}
                 </>
               )}
             </div>
@@ -570,17 +849,78 @@ export function GameViewer({ gameId, username }: { gameId: string; username: str
           </div>
         </section>
 
+        {variation && (
+          <section className="variation-panel" aria-label="Созданный вариант">
+            <header className="variation-panel__header">
+              <div>
+                <span>
+                  {variation.basePly === 0
+                    ? 'Вариант от начальной позиции'
+                    : `Вариант после ${game.moves[variation.basePly - 1].san}`}
+                </span>
+                <strong>{variation.moves.length} ходов</strong>
+              </div>
+              <div className="variation-panel__actions">
+                {isVariation && (
+                  <button onClick={() => selectMainlinePly(variation.basePly)} type="button">
+                    К партии
+                  </button>
+                )}
+                <button
+                  aria-label="Удалить вариант"
+                  onClick={() => {
+                    setVariation(null);
+                    setVariationStep(null);
+                  }}
+                  type="button"
+                >
+                  Удалить
+                </button>
+              </div>
+            </header>
+            <div className="variation-line">
+              <button
+                aria-pressed={isVariation && activeVariationStep === 0}
+                onClick={() => openVariationStep(0)}
+                type="button"
+              >
+                Точка ветвления
+              </button>
+              {variation.moves.map((move, index) => (
+                <button
+                  aria-pressed={isVariation && activeVariationStep === index + 1}
+                  key={`${move.from}-${move.to}-${index}`}
+                  onClick={() => openVariationStep(index + 1)}
+                  type="button"
+                >
+                  <small>{move.color === 'w' ? `${move.moveNumber}.` : `${move.moveNumber}…`}</small>
+                  {move.san}
+                </button>
+              ))}
+            </div>
+            {!isVariation && (
+              <button
+                className="variation-panel__open"
+                onClick={() => openVariationStep(variation.moves.length)}
+                type="button"
+              >
+                Вернуться к варианту
+              </button>
+            )}
+          </section>
+        )}
+
         <div className="moves-list" aria-label="Ходы партии">
           {moveRows.map((row) => (
             <div className="move-row" key={row.number}>
               <span className="move-number">{row.number}.</span>
               {[row.white, row.black].map((move, colorIndex) => move ? (
                 <button
-                  aria-current={currentPly === move.ply ? 'step' : undefined}
+                  aria-current={!isVariation && currentPly === move.ply ? 'step' : undefined}
                   className="move-button"
                   key={move.ply}
-                  onClick={() => setCurrentPly(move.ply)}
-                  ref={currentPly === move.ply ? activeMoveRef : undefined}
+                  onClick={() => selectMainlinePly(move.ply)}
+                  ref={!isVariation && currentPly === move.ply ? activeMoveRef : undefined}
                   type="button"
                 >
                   <span className="move-san">
@@ -606,11 +946,11 @@ export function GameViewer({ gameId, username }: { gameId: string; username: str
         </div>
 
         <div className="move-controls" aria-label="Навигация по ходам">
-          <button aria-label="В начало" disabled={currentPly === 0} onClick={() => setCurrentPly(0)} type="button">«</button>
-          <button aria-label="На ход назад" disabled={currentPly === 0} onClick={() => setCurrentPly((ply) => ply - 1)} type="button">‹</button>
-          <span>{currentPly} / {game.moves.length}</span>
-          <button aria-label="На ход вперёд" disabled={currentPly === game.moves.length} onClick={() => setCurrentPly((ply) => ply + 1)} type="button">›</button>
-          <button aria-label="В конец" disabled={currentPly === game.moves.length} onClick={() => setCurrentPly(game.moves.length)} type="button">»</button>
+          <button aria-label="В начало" disabled={navigationPosition === 0} onClick={() => navigate('start')} type="button">«</button>
+          <button aria-label="На ход назад" disabled={navigationPosition === 0} onClick={() => navigate('previous')} type="button">‹</button>
+          <span>{isVariation ? 'Вариант ' : ''}{navigationPosition} / {navigationLength}</span>
+          <button aria-label="На ход вперёд" disabled={navigationPosition === navigationLength} onClick={() => navigate('next')} type="button">›</button>
+          <button aria-label="В конец" disabled={navigationPosition === navigationLength} onClick={() => navigate('end')} type="button">»</button>
         </div>
 
         <footer className="moves-footer">

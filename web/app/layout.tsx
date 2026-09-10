@@ -1,10 +1,11 @@
 import type { Metadata } from 'next';
 import './globals.css';
-import './statistics-sections.css';
+import './opening-mistakes.css';
+import './endgame-errors.css';
 
 export const metadata: Metadata = {
   title: 'Анализ моих партий · Lichess',
-  description: 'Статистика качества игры и просмотр локальной истории партий Lichess.',
+  description: 'Проигранные дебюты и просмотр локальной истории партий Lichess.',
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
