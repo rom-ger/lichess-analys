@@ -56,7 +56,15 @@ type Variation = {
   moves: VariationMove[];
 };
 
-type BoardMove = Pick<GameMove, 'from' | 'san' | 'to'>;
+type BoardMove = Pick<GameMove, 'from' | 'san' | 'to'> & {
+  promotion?: Promotion;
+};
+
+type BoardArrow = {
+  color: 'blue' | 'gray' | 'green' | 'red' | 'yellow';
+  from: string;
+  to: string;
+};
 
 type PieceDrag = {
   from: string;
@@ -158,14 +166,28 @@ function playUciVariation(fen: string, uciMoves: string[]) {
   return moves;
 }
 
+function moveFromUci(uci: string | null | undefined) {
+  const match = uci?.match(/^([a-h][1-8])([a-h][1-8])([qrbn])?$/);
+  return match ? { from: match[1], promotion: match[3], to: match[2] } : null;
+}
+
+function moveMatchesUci(move: BoardMove, uci: string | null | undefined) {
+  const engineMove = moveFromUci(uci);
+  if (!engineMove || move.from !== engineMove.from || move.to !== engineMove.to) return false;
+  if (!engineMove.promotion) return true;
+
+  const sanPromotion = move.san.match(/=([QRBN])/)?.[1]?.toLowerCase();
+  return (move.promotion ?? sanPromotion) === engineMove.promotion;
+}
+
 function ChessBoard({
-  bestMove,
+  arrows,
   fen,
   orientation,
   lastMove,
   onMove,
 }: {
-  bestMove?: string | null;
+  arrows: BoardArrow[];
   fen: string;
   orientation: GameDetails['playerColor'];
   lastMove?: BoardMove;
@@ -185,34 +207,31 @@ function ChessBoard({
   } | null>(null);
   const shownFiles = orientation === 'white' ? files : [...files].reverse();
   const shownRanks = orientation === 'white' ? ranks : [...ranks].reverse();
-  const bestMoveMatch = bestMove?.match(/^([a-h][1-8])([a-h][1-8])/);
-  const bestFrom = bestMoveMatch?.[1];
-  const bestTo = bestMoveMatch?.[2];
-  const bestArrow = (() => {
-    if (!bestFrom || !bestTo) return null;
-    const rawFromX = (shownFiles.indexOf(bestFrom[0]) + 0.5) * 12.5;
-    const rawFromY = (shownRanks.indexOf(bestFrom[1]) + 0.5) * 12.5;
-    const rawToX = (shownFiles.indexOf(bestTo[0]) + 0.5) * 12.5;
-    const rawToY = (shownRanks.indexOf(bestTo[1]) + 0.5) * 12.5;
+  const arrowGeometry = arrows.flatMap((arrow) => {
+    const rawFromX = (shownFiles.indexOf(arrow.from[0]) + 0.5) * 12.5;
+    const rawFromY = (shownRanks.indexOf(arrow.from[1]) + 0.5) * 12.5;
+    const rawToX = (shownFiles.indexOf(arrow.to[0]) + 0.5) * 12.5;
+    const rawToY = (shownRanks.indexOf(arrow.to[1]) + 0.5) * 12.5;
     const deltaX = rawToX - rawFromX;
     const deltaY = rawToY - rawFromY;
     const distance = Math.hypot(deltaX, deltaY);
-    if (distance === 0) return null;
+    if (distance === 0) return [];
     const padding = 2.2;
     const unitX = deltaX / distance;
     const unitY = deltaY / distance;
     const perpendicularX = -unitY;
     const perpendicularY = unitX;
-    const headLength = 3;
-    const headHalfWidth = 1.5;
-    const strokeCapRadius = 0.575;
-    const headOverlap = 0.3;
+    const headLength = 3.5;
+    const headHalfWidth = 1.9;
+    const strokeCapRadius = 0.8;
+    const headOverlap = 0.4;
     const tipX = rawToX - unitX * padding;
     const tipY = rawToY - unitY * padding;
     const headBaseX = tipX - unitX * headLength;
     const headBaseY = tipY - unitY * headLength;
 
-    return {
+    return [{
+      color: arrow.color,
       fromX: rawFromX + unitX * padding,
       fromY: rawFromY + unitY * padding,
       headPoints: [
@@ -222,8 +241,8 @@ function ChessBoard({
       ].join(' '),
       lineToX: headBaseX - unitX * (strokeCapRadius - headOverlap),
       lineToY: headBaseY - unitY * (strokeCapRadius - headOverlap),
-    };
-  })();
+    }];
+  });
   const legalMoves = useMemo(() => (
     selectedSquare
       ? chess.moves({ square: selectedSquare as Square, verbose: true })
@@ -389,20 +408,24 @@ function ChessBoard({
           </button>
         );
       }))}
-      {bestArrow && (
+      {arrowGeometry.length > 0 && (
         <svg
           aria-hidden="true"
-          className="best-move-arrow"
+          className="board-arrows"
           preserveAspectRatio="none"
           viewBox="0 0 100 100"
         >
-          <line
-            x1={bestArrow.fromX}
-            x2={bestArrow.lineToX}
-            y1={bestArrow.fromY}
-            y2={bestArrow.lineToY}
-          />
-          <polygon points={bestArrow.headPoints} />
+          {arrowGeometry.map((arrow, index) => (
+            <g className={`board-arrow board-arrow--${arrow.color}`} key={`${arrow.fromX}-${arrow.fromY}-${index}`}>
+              <line
+                x1={arrow.fromX}
+                x2={arrow.lineToX}
+                y1={arrow.fromY}
+                y2={arrow.lineToY}
+              />
+              <polygon points={arrow.headPoints} />
+            </g>
+          ))}
         </svg>
       )}
       {pieceDrag?.isDragging && (
@@ -783,11 +806,77 @@ export function GameViewer({
     ? (variationAnalysisByFen[fen]
       ?? (activeVariationStep === 0 && variation ? engineAnalysisByPly[variation.basePly] : undefined))
     : engineAnalysisByPly[currentPly];
+  const previousKnownVariationEvaluation = variation
+    ? variation.moves
+      .slice(0, Math.max(0, activeVariationStep - 1))
+      .reverse()
+      .map((move) => variationAnalysisByFen[move.fen]?.evaluation)
+      .find((evaluation) => evaluation !== undefined)
+      ?? variationAnalysisByFen[variationBaseFen]?.evaluation
+      ?? engineAnalysisByPly[variation.basePly]?.evaluation
+      ?? evaluations[variation.basePly]
+    : null;
+  const previousKnownMainlineEvaluation = evaluations
+    .slice(0, currentPly)
+    .reverse()
+    .find((evaluation) => evaluation !== null);
   const currentEvaluation = currentEngineAnalysis?.evaluation
-    ?? (isVariation && variation && activeVariationStep === 0
-      ? evaluations[variation.basePly]
-      : isVariation ? null : evaluations[currentPly])
+    ?? (isVariation
+      ? previousKnownVariationEvaluation
+      : evaluations[currentPly] ?? previousKnownMainlineEvaluation)
     ?? null;
+  const previousVariationFen = variation && activeVariationStep > 1
+    ? variation.moves[activeVariationStep - 2].fen
+    : variationBaseFen;
+  const previousEngineAnalysis = currentMove
+    ? (isVariation && variation
+      ? (variationAnalysisByFen[previousVariationFen]
+        ?? (activeVariationStep === 1 ? engineAnalysisByPly[variation.basePly] : undefined))
+      : engineAnalysisByPly[Math.max(0, currentPly - 1)])
+    : undefined;
+  const currentMoveColor = isVariation
+    ? variationMove?.color
+    : mainlineMove ? (mainlineMove.ply % 2 === 1 ? 'w' : 'b') : undefined;
+  const currentMoveJudgement = currentMove
+    ? (isVariation && currentMoveColor
+      ? classifyMove(
+        previousEngineAnalysis?.evaluation ?? null,
+        currentEngineAnalysis?.evaluation ?? null,
+        currentMoveColor === 'w' ? 'white' : 'black',
+      ).judgement
+      : annotatedMoves[currentPly - 1]?.judgement ?? null)
+    : null;
+  const boardArrows = (() => {
+    const currentSuggestion = moveFromUci(currentEngineAnalysis?.bestMove);
+    const suggestionArrow = currentSuggestion
+      ? [{ ...currentSuggestion, color: 'gray' as const }]
+      : [];
+
+    if (!currentMove) {
+      return suggestionArrow;
+    }
+
+    const annotation = currentMove.san;
+    const playedColor: BoardArrow['color'] = moveMatchesUci(
+      currentMove,
+      previousEngineAnalysis?.bestMove,
+    )
+      ? 'green'
+      : currentMoveJudgement === 'blunder'
+        || annotation.includes('??')
+        ? 'red'
+        : currentMoveJudgement !== null
+          || annotation.includes('?!')
+          || annotation.includes('!?')
+          || annotation.endsWith('?')
+          ? 'yellow'
+          : 'blue';
+
+    return [
+      ...suggestionArrow,
+      { from: currentMove.from, to: currentMove.to, color: playedColor },
+    ];
+  })();
   const analysisIsRunning = analysisStatus.kind === 'position' || analysisStatus.kind === 'full';
   const clockSourceMove = isVariation && variation
     ? (variation.basePly > 0 ? game.moves[variation.basePly - 1] : undefined)
@@ -987,7 +1076,7 @@ export function GameViewer({
         <div className="board-with-evaluation">
           <EvaluationBar evaluation={currentEvaluation} orientation={game.playerColor} />
           <ChessBoard
-            bestMove={currentEngineAnalysis?.bestMove}
+            arrows={boardArrows}
             fen={fen}
             key={fen}
             lastMove={currentMove}

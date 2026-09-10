@@ -548,7 +548,7 @@ code {
 .board-square--last::after {
   position: absolute;
   inset: 0;
-  background: rgb(231 197 75 / 55%);
+  background: rgb(236 209 107 / 30%);
   content: '';
 }
 
@@ -568,7 +568,7 @@ code {
   background: transparent;
 }
 
-.best-move-arrow {
+.board-arrows {
   position: absolute;
   z-index: 4;
   inset: 0;
@@ -578,15 +578,21 @@ code {
   pointer-events: none;
 }
 
-.best-move-arrow line {
-  stroke: rgb(38 103 201 / 58%);
+.board-arrow line {
   stroke-linecap: round;
-  stroke-width: 1.15;
+  stroke-width: 1.6;
 }
 
-.best-move-arrow polygon {
-  fill: rgb(38 103 201 / 58%);
-}
+.board-arrow--gray line { stroke: rgb(79 82 78 / 48%); }
+.board-arrow--gray polygon { fill: rgb(79 82 78 / 48%); }
+.board-arrow--green line { stroke: rgb(31 137 83 / 68%); }
+.board-arrow--green polygon { fill: rgb(31 137 83 / 68%); }
+.board-arrow--blue line { stroke: rgb(38 103 201 / 62%); }
+.board-arrow--blue polygon { fill: rgb(38 103 201 / 62%); }
+.board-arrow--yellow line { stroke: rgb(213 162 30 / 72%); }
+.board-arrow--yellow polygon { fill: rgb(213 162 30 / 72%); }
+.board-arrow--red line { stroke: rgb(190 55 49 / 70%); }
+.board-arrow--red polygon { fill: rgb(190 55 49 / 70%); }
 
 .chess-piece {
   position: relative;
