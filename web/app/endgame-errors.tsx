@@ -81,6 +81,11 @@ function EndgameGroup({ group, featured }: { group: DecisiveEndgameGroup; featur
                 <div>
                   <strong>Против {example.opponent}</strong>
                   <span>{dateFormatter.format(example.playedAt)} · ход {example.moveNumber}</span>
+                  <span>
+                    {example.badUntil === 'gameEnd'
+                      ? 'Позиция не улучшалась до конца партии'
+                      : `Позиция не улучшалась до зевка соперника ${Math.ceil(example.badUntilPly / 2)}${example.badUntilPly % 2 === 1 ? '.' : '…'}${example.opponentBlunderMove ?? ''}`}
+                  </span>
                 </div>
                 <span className="endgame-evaluation-drop">
                   {formatCentipawnEvaluation(example.beforeEvaluation)} →{' '}
@@ -179,7 +184,10 @@ export function EndgameErrors({
           <p>
             До вашего хода оценка за вас была не ниже{' '}
             {formatCentipawnEvaluation(index.endgame.notLostMinEvaluation)}, после — не выше{' '}
-            {formatCentipawnEvaluation(index.endgame.lostMaxEvaluation)}, и затем позиция уже не восстановилась.
+            {formatCentipawnEvaluation(index.endgame.lostMaxEvaluation)}. Затем оценка не поднималась
+            выше значения после ошибки — до конца партии или зевка соперника с потерей от{' '}
+            {(index.endgame.opponentBlunderLoss / 100).toFixed(2)} пешек.
+            Учитываются любые результаты, включая победы по времени и после зевка соперника.
           </p>
         </div>
         <div className="endgame-sample">
@@ -192,9 +200,9 @@ export function EndgameErrors({
         <div className="endgame-empty">
           <strong>Таких окончаний не найдено</strong>
           <p>
-            {summary.lostGames === 0
-              ? 'В выбранных партиях нет поражений.'
-              : 'В поражениях этого периода не было одного решающего хода в удерживаемом эндшпиле.'}
+            {summary.selectedGames === 0
+              ? 'Нет проанализированных партий с выбранными фильтрами.'
+              : 'В выбранных партиях нет эндшпильных ходов, подходящих под эти условия.'}
           </p>
         </div>
       ) : (

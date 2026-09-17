@@ -177,7 +177,7 @@ h1 {
 
 .view-switcher {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 6px;
   padding: 10px 18px;
   border-bottom: 1px solid var(--line);
@@ -1152,7 +1152,7 @@ code {
   }
   .filter-group { flex: 0 0 auto; }
   .filter-options { flex-wrap: nowrap; }
-  .view-switcher { overflow-x: auto; grid-template-columns: repeat(3, minmax(150px, 1fr)); padding: 8px 12px; }
+  .view-switcher { overflow-x: auto; grid-template-columns: repeat(4, minmax(150px, 1fr)); padding: 8px 12px; }
   .games-list { padding: 0 12px 12px; }
   .table-header { display: none; }
 

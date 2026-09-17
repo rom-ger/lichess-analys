@@ -11,9 +11,10 @@ import {
 import type { AnalysisFilters } from '../lib/statistics';
 import { EndgameErrors } from './endgame-errors';
 import { OpeningMistakes } from './opening-mistakes';
+import { PeriodSummary } from './period-summary';
 
 type Period = '30d' | '90d' | 'year' | 'all' | 'custom';
-type HomeView = 'games' | 'openings' | 'endgames';
+type HomeView = 'games' | 'openings' | 'endgames' | 'summary';
 
 type SavedFilters = {
   period: Period;
@@ -29,6 +30,7 @@ const FILTERS_STORAGE_KEY = 'lichess-analysis:main-filters:v1';
 
 const views: Array<{ value: HomeView; label: string }> = [
   { value: 'games', label: 'Все партии' },
+  { value: 'summary', label: 'Резюме периода' },
   { value: 'openings', label: 'Проигранные дебюты' },
   { value: 'endgames', label: 'Ошибки в эндшпиле' },
 ];
@@ -301,6 +303,7 @@ export function GamesList({ username }: { username: string }) {
 
       {view === 'openings' && <OpeningMistakes filters={analysisFilters} username={username} />}
       {view === 'endgames' && <EndgameErrors filters={analysisFilters} username={username} />}
+      {view === 'summary' && <PeriodSummary filters={analysisFilters} username={username} />}
 
       {view === 'games' && (games.length === 0 ? (
         <div className="state-message">

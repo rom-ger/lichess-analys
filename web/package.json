@@ -9,6 +9,7 @@
     "preanalyze:pgn": "node scripts/check-node-version.mjs",
     "analyze:pgn": "node scripts/analyze-pgn.mjs",
     "statistics": "node scripts/build-statistics-index.mjs",
+    "test:summary": "node --experimental-strip-types --test scripts/period-summary.test.mjs",
     "predev": "node scripts/check-node-version.mjs && node scripts/sync-stockfish-assets.mjs && node scripts/build-statistics-index.mjs",
     "dev": "vinext dev",
     "prebuild": "node scripts/check-node-version.mjs && node scripts/sync-stockfish-assets.mjs && node scripts/build-statistics-index.mjs",

@@ -1,4 +1,5 @@
 import { Chess } from 'chess.js';
+import type { SummarySourceGame } from './period-summary';
 
 const pgnFiles = import.meta.glob('../../pgn/*.pgn', {
   eager: true,
@@ -301,6 +302,16 @@ export function getRecentGames(
     hasNext: filteredGames.length > start + PAGE_SIZE,
     total: filteredGames.length,
   };
+}
+
+/** Lightweight PGN inventory for coverage, filters and comparison periods. */
+export function getSummarySourceGames(username: string): SummarySourceGame[] {
+  const name = username.toLowerCase();
+  return gamesFor(username)
+    .filter((game) => (game.tags.White.toLowerCase() === name || game.tags.Black.toLowerCase() === name)
+      && ['1-0', '0-1', '1/2-1/2'].includes(game.tags.Result))
+    .map((game) => ({ gameId: game.id, playedAt: game.playedAt,
+      speed: game.speed ?? null, result: game.resultKey, timeControl: game.tags.TimeControl ?? null }));
 }
 
 export function getGameById(username: string, id: string): GameDetails | undefined {

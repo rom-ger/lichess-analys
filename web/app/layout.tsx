@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import './globals.css';
 import './opening-mistakes.css';
 import './endgame-errors.css';
+import './period-summary.css';
 
 export const metadata: Metadata = {
   title: 'Анализ моих партий · Lichess',

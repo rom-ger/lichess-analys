@@ -3,16 +3,18 @@ import { readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Chess } from 'chess.js';
+import { OPENING_RULES, openingPhaseBeforeMoves } from './opening-phase.mjs';
+import { classifyOpeningError } from './opening-error-themes.mjs';
+import { buildPeriodMetrics, validateSummaryAnalysis } from './period-metrics.mjs';
 
 const ENGINE_VERSION = '18-lite';
 const ENGINE_DEPTH = 18;
-const OPENING_PLIES = 30;
-const MINIMUM_EVALUATION_LOSS = 100;
-const BAD_POSITION_MAX_EVALUATION = -150;
-const RECOVERED_POSITION_MIN_EVALUATION = -50;
+const OPENING_PLIES = OPENING_RULES.maxFullMoves * 2;
+const OPENING_NOT_LOST_MIN_EVALUATION = -50;
+const OPENING_LOST_MAX_EVALUATION = -200;
 const OPPONENT_BLUNDER_LOSS = 300;
-const ENDGAME_NOT_LOST_MIN_EVALUATION = -150;
-const ENDGAME_LOST_MAX_EVALUATION = -300;
+const ENDGAME_NOT_LOST_MIN_EVALUATION = -50;
+const ENDGAME_LOST_MAX_EVALUATION = -200;
 
 const webRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const repositoryRoot = join(webRoot, '..');
@@ -99,73 +101,72 @@ function uciToSan(fen, uci) {
   }
 }
 
-function lostOpeningForColor(analysis, moves, color) {
+// Keep the error if the position stays at least as bad until the end or
+// the opponent's first serious blunder. An earlier improvement rejects it.
+function badPositionEnding(analysis, moves, color, index, afterEvaluation) {
+  const moveColor = color === 'white' ? 'w' : 'b';
+  for (let futureIndex = index + 1; futureIndex < moves.length; futureIndex += 1) {
+    const move = moves[futureIndex];
+    const before = analysis.positions[futureIndex];
+    const after = analysis.positions[futureIndex + 1];
+    if (
+      move.color !== moveColor
+      && evaluationLoss(move, before, after) >= OPPONENT_BLUNDER_LOSS
+    ) {
+      return {
+        badUntil: 'opponentBlunder',
+        badUntilPly: futureIndex + 1,
+        opponentBlunderMove: move.san,
+      };
+    }
+    if (evaluationFor(after.evaluation, color) > afterEvaluation) return null;
+  }
+  return { badUntil: 'gameEnd', badUntilPly: moves.length, opponentBlunderMove: null };
+}
+
+function lostOpeningForColor(analysis, moves, color, openingPositions) {
   const moveColor = color === 'white' ? 'w' : 'b';
   const limit = Math.min(OPENING_PLIES, moves.length);
 
   for (let index = 0; index < limit; index += 1) {
     const move = moves[index];
-    if (move.color !== moveColor) continue;
+    if (move.color !== moveColor || !openingPositions[index]) continue;
 
     const before = analysis.positions[index];
     const after = analysis.positions[index + 1];
-    const loss = evaluationLoss(move, before, after);
+    const moveNumber = Number(before.fen.split(' ')[5]);
+    const beforeEvaluation = evaluationFor(before.evaluation, color);
     const afterEvaluation = evaluationFor(after.evaluation, color);
-    if (loss < MINIMUM_EVALUATION_LOSS || afterEvaluation > BAD_POSITION_MAX_EVALUATION) continue;
-
-    let ending = { type: 'gameEnd', ply: moves.length, move: null };
-    let stayedBad = true;
-
-    for (let futureIndex = index + 1; futureIndex < moves.length; futureIndex += 1) {
-      const futureMove = moves[futureIndex];
-      const futureBefore = analysis.positions[futureIndex];
-      const futureAfter = analysis.positions[futureIndex + 1];
-
-      if (
-        futureMove.color !== moveColor
-        && evaluationLoss(futureMove, futureBefore, futureAfter) >= OPPONENT_BLUNDER_LOSS
-      ) {
-        ending = {
-          type: 'opponentBlunder',
-          ply: futureIndex + 1,
-          move: futureMove.san,
-        };
-        break;
-      }
-
-      if (
-        evaluationFor(futureAfter.evaluation, color)
-        >= RECOVERED_POSITION_MIN_EVALUATION
-      ) {
-        stayedBad = false;
-        break;
-      }
-    }
-
-    if (!stayedBad) continue;
+    if (
+      beforeEvaluation < OPENING_NOT_LOST_MIN_EVALUATION
+      || afterEvaluation > OPENING_LOST_MAX_EVALUATION
+    ) continue;
+    const ending = badPositionEnding(analysis, moves, color, index, afterEvaluation);
+    if (!ending) continue;
 
     return {
       positionKey: positionKey(before.fen),
+      themes: classifyOpeningError(analysis, moves, index),
       fen: before.fen,
       ply: index + 1,
-      moveNumber: Math.floor(index / 2) + 1,
+      moveNumber,
       playedMove: move.san,
       bestMove: uciToSan(before.fen, before.bestMove),
-      evaluationLoss: loss,
+      beforeEvaluation,
+      evaluationLoss: beforeEvaluation - afterEvaluation,
       afterEvaluation,
-      badUntil: ending.type,
-      badUntilPly: ending.ply,
-      opponentBlunderMove: ending.move,
+      ...ending,
     };
   }
 
   return null;
 }
 
-function lostOpenings(analysis, moves, result) {
+function lostOpenings(analysis, moves) {
+  const openingPositions = openingPhaseBeforeMoves(moves, (fen) => isEndgame(materialFromFen(fen)));
   return {
-    white: result === '0-1' ? lostOpeningForColor(analysis, moves, 'white') : null,
-    black: result === '1-0' ? lostOpeningForColor(analysis, moves, 'black') : null,
+    white: lostOpeningForColor(analysis, moves, 'white', openingPositions),
+    black: lostOpeningForColor(analysis, moves, 'black', openingPositions),
   };
 }
 
@@ -285,18 +286,8 @@ function decisiveEndgameForColor(analysis, moves, color) {
       || afterEvaluation > ENDGAME_LOST_MAX_EVALUATION
     ) continue;
 
-    let recovered = false;
-    for (let futureIndex = index + 1; futureIndex < moves.length; futureIndex += 1) {
-      const futureEvaluation = evaluationFor(
-        analysis.positions[futureIndex + 1].evaluation,
-        color,
-      );
-      if (futureEvaluation >= ENDGAME_NOT_LOST_MIN_EVALUATION) {
-        recovered = true;
-        break;
-      }
-    }
-    if (recovered) continue;
+    const ending = badPositionEnding(analysis, moves, color, index, afterEvaluation);
+    if (!ending) continue;
 
     return {
       type: endgameType(material),
@@ -308,16 +299,17 @@ function decisiveEndgameForColor(analysis, moves, color) {
       beforeEvaluation,
       afterEvaluation,
       evaluationLoss: beforeEvaluation - afterEvaluation,
+      ...ending,
     };
   }
 
   return null;
 }
 
-function decisiveEndgames(analysis, moves, result) {
+function decisiveEndgames(analysis, moves) {
   return {
-    white: result === '0-1' ? decisiveEndgameForColor(analysis, moves, 'white') : null,
-    black: result === '1-0' ? decisiveEndgameForColor(analysis, moves, 'black') : null,
+    white: decisiveEndgameForColor(analysis, moves, 'white'),
+    black: decisiveEndgameForColor(analysis, moves, 'black'),
   };
 }
 
@@ -359,9 +351,14 @@ async function main() {
       chess.loadPgn(source.gamePgn);
       const moves = chess.history({ verbose: true });
       const analysis = JSON.parse(await readFile(join(analysisRoot, entry.file), 'utf8'));
-      if (analysis.positions.length !== moves.length + 1) {
-        throw new Error('число позиций не совпадает с PGN');
-      }
+      validateSummaryAnalysis(analysis, moves, entry.gameId, manifest.engine);
+      if (!['1-0', '0-1', '1/2-1/2'].includes(source.tags.Result)) continue;
+      const openings = lostOpenings(analysis, moves);
+      const openingPositions = openingPhaseBeforeMoves(moves, (fen) => isEndgame(materialFromFen(fen)));
+      const endgameTypes = moves.map((move) => {
+        const material = materialFromFen(move.before);
+        return isEndgame(material) ? endgameType(material) : null;
+      });
 
       statistics.push({
         gameId: entry.gameId,
@@ -370,8 +367,9 @@ async function main() {
         result: source.tags.Result,
         white: source.tags.White,
         black: source.tags.Black,
-        lostOpening: lostOpenings(analysis, moves, source.tags.Result),
-        decisiveEndgame: decisiveEndgames(analysis, moves, source.tags.Result),
+        lostOpening: openings,
+        decisiveEndgame: decisiveEndgames(analysis, moves),
+        periodMetrics: buildPeriodMetrics(analysis, moves, openingPositions, endgameTypes, source.tags.Result, openings),
       });
     } catch (error) {
       failures.push(`${entry.gameId}: ${error instanceof Error ? error.message : String(error)}`);
@@ -380,25 +378,27 @@ async function main() {
 
   const temporaryFile = join(analysisRoot, `.${randomUUID()}.statistics.json.tmp`);
   await writeFile(temporaryFile, `${JSON.stringify({
-    schemaVersion: 9,
+    schemaVersion: 14,
     engine: manifest.engine,
     generatedAt: new Date().toISOString(),
     opening: {
       plies: OPENING_PLIES,
-      minimumEvaluationLoss: MINIMUM_EVALUATION_LOSS,
-      badPositionMaxEvaluation: BAD_POSITION_MAX_EVALUATION,
-      recoveredPositionMinEvaluation: RECOVERED_POSITION_MIN_EVALUATION,
+      earlyFullMoves: OPENING_RULES.earlyFullMoves,
+      developedMinors: OPENING_RULES.developedMinors,
+      notLostMinEvaluation: OPENING_NOT_LOST_MIN_EVALUATION,
+      lostMaxEvaluation: OPENING_LOST_MAX_EVALUATION,
       opponentBlunderLoss: OPPONENT_BLUNDER_LOSS,
     },
     endgame: {
       notLostMinEvaluation: ENDGAME_NOT_LOST_MIN_EVALUATION,
       lostMaxEvaluation: ENDGAME_LOST_MAX_EVALUATION,
+      opponentBlunderLoss: OPPONENT_BLUNDER_LOSS,
     },
     games: statistics,
   })}\n`, 'utf8');
   await rename(temporaryFile, outputFile);
 
-  console.log(`Индекс проигранных дебютов: ${statistics.length} партий → ${outputFile}`);
+  console.log(`Индекс анализа и резюме: ${statistics.length} партий → ${outputFile}`);
   if (failures.length > 0) {
     console.warn(`Пропущено партий: ${failures.length}`);
     for (const failure of failures.slice(0, 20)) console.warn(`  ${failure}`);
